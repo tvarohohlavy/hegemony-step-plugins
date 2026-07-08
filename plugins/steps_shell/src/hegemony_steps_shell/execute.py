@@ -1,0 +1,265 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""ShellExecuteHandler: run shell commands on remote hosts.
+
+The remote-shell paradigm (see CONVENTIONS.md): exec-channel semantics with
+meaningful exit codes and separate stdout/stderr — distinct from netcli's
+interactive prompt-scraping. The transport (SSH today, WinRM when the host
+implements it) is resolved from ``device.access_config`` via
+``services.open_shell``; the interpreter is config, never part of the id.
+"""
+
+import logging
+import shlex
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from hegemony_step_sdk import (
+    MAX_CHAIN_OUTPUT_CHARS,
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    HandlerTargeting,
+    StepKind,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
+_SH_FAMILY = frozenset({"sh", "bash"})
+
+
+def build_command(
+    command: str,
+    *,
+    shell: str = "default",
+    env: dict[str, str] | None = None,
+) -> str:
+    """Compose the remote command line for the chosen interpreter.
+
+    - ``default``: the command runs as-is in the account's login shell; env
+      vars are prefixed via ``env KEY=VALUE`` (POSIX remotes).
+    - ``sh``/``bash``: the command is quoted into ``<shell> -c '...'``.
+    - ``pwsh``: the command is quoted into ``pwsh -NoProfile -Command '...'``;
+      env vars are not supported (no portable prefix syntax).
+
+    Raises ``ValueError`` for unsupported combinations.
+    """
+    env = env or {}
+    if shell == "pwsh":
+        if env:
+            raise ValueError("env variables are not supported with the pwsh interpreter")
+        return f"pwsh -NoProfile -Command {shlex.quote(command)}"
+
+    prefix = ""
+    if env:
+        pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
+        prefix = f"env {pairs} "
+
+    if shell in _SH_FAMILY:
+        return f"{prefix}{shell} -c {shlex.quote(command)}"
+    if shell == "default":
+        return f"{prefix}{command}"
+    raise ValueError(f"unsupported shell interpreter: {shell}")
+
+
+class ShellExecuteConfig(BaseModel):
+    """Config for ``shell.execute``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    commands: list[str] = Field(
+        default_factory=list,
+        title="Commands (one per line)",
+        description="Each line runs as its own exec-channel command with its own exit code",
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "uname -a\ndf -h /var\nsystemctl is-active nginx",
+            "x_rows": 3,
+            "x_col_span": 2,
+        },
+    )
+    shell: Literal["default", "sh", "bash", "pwsh"] = Field(
+        default="default",
+        title="Interpreter",
+        description="How commands are wrapped on the remote host",
+        json_schema_extra={
+            "x_option_labels": {
+                "default": "Login shell (as-is)",
+                "sh": "sh -c",
+                "bash": "bash -c",
+                "pwsh": "pwsh -NoProfile -Command",
+            }
+        },
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        title="Environment Variables",
+        description="KEY=VALUE per line; prefixed via env(1). Not supported with pwsh.",
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_rows": 3,
+            "x_col_span": 2,
+            "x_placeholder": "APP_ENV=prod\nRETRIES=3",
+        },
+    )
+    fail_fast: bool = Field(
+        default=True,
+        title="Stop on first failure",
+        description="Skip remaining commands on a device after a non-zero exit code",
+    )
+    command_timeout_sec: int = Field(
+        default=60,
+        ge=1,
+        title="Per-command timeout (sec)",
+    )
+
+
+class ShellExecuteHandler(BaseHandler):
+    """Run shell commands on each target host over the device's shell transport."""
+
+    handler_id = "shell.execute"
+    supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
+    display_name = "Execute Shell"
+    description = "Run shell commands on Linux/Unix hosts (exit codes, stdout/stderr)."
+    category = "Actions"
+    targeting = HandlerTargeting(roles=True, ips=False)
+    config_model = ShellExecuteConfig
+    default_config = {"shell": "default", "fail_fast": True, "command_timeout_sec": 60}
+
+    async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        target_devices = ctx.get_target_devices()
+        if not target_devices:
+            return HandlerResult(
+                success=False,
+                error="No target devices configured",
+                summary="Missing target device",
+            )
+
+        commands = ctx.config.get("commands", [])
+        if not commands:
+            return HandlerResult(
+                success=False,
+                error="No commands configured",
+                summary="Missing command configuration",
+            )
+
+        shell = ctx.config.get("shell", "default")
+        env = ctx.config.get("env") or {}
+        fail_fast = bool(ctx.config.get("fail_fast", True))
+        command_timeout = ctx.config.get("command_timeout_sec", 60)
+
+        try:
+            composed = [build_command(cmd, shell=shell, env=env) for cmd in commands]
+        except ValueError as exc:
+            return HandlerResult(
+                success=False,
+                error=str(exc),
+                summary="Shell configuration error",
+            )
+
+        services = ctx.require_services()
+        all_evidence: list[dict[str, Any]] = []
+        device_errors: list[str] = []
+        combined_output_parts: list[str] = []
+        executed = 0
+        all_success = True
+
+        for device in target_devices:
+            device_id = device.get("id", device.get("mgmt_host"))
+            device_name = device.get("name", device_id)
+            if not device.get("mgmt_host"):
+                all_success = False
+                device_errors.append(f"{device_name}: no mgmt_host configured")
+                continue
+
+            try:
+                transport = await services.open_shell(device)
+            except Exception as exc:
+                all_success = False
+                device_errors.append(f"{device_name}: {exc}")
+                all_evidence.append(
+                    {
+                        "kind": "cli_output",
+                        "name": f"Error ({device_name})",
+                        "device_id": device_id,
+                        "content_text": str(exc),
+                        "content_json": {
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "error": str(exc),
+                            "success": False,
+                        },
+                    }
+                )
+                continue
+
+            try:
+                for original, remote_command in zip(commands, composed, strict=True):
+                    result = await transport.run(remote_command, timeout=command_timeout)
+                    executed += 1
+                    ok = result.exit_code == 0
+                    if result.stdout:
+                        combined_output_parts.append(result.stdout)
+
+                    display_name_suffix = (
+                        f"{original} ({device_name})" if len(target_devices) > 1 else original
+                    )
+                    all_evidence.append(
+                        {
+                            "kind": "cli_output",
+                            "name": display_name_suffix,
+                            "device_id": device_id,
+                            "content_text": result.stdout
+                            if ok
+                            else (result.stderr or result.stdout),
+                            "content_json": {
+                                "device_id": device_id,
+                                "device_name": device_name,
+                                "command": original,
+                                "exit_code": result.exit_code,
+                                "success": ok,
+                                "stderr": result.stderr[:MAX_CHAIN_OUTPUT_CHARS],
+                            },
+                        }
+                    )
+                    if not ok:
+                        all_success = False
+                        detail = (result.stderr or result.stdout or "").strip().splitlines()
+                        first_line = detail[0] if detail else ""
+                        device_errors.append(
+                            f"{device_name}: exit {result.exit_code}"
+                            + (f" ({first_line})" if first_line else "")
+                        )
+                        if fail_fast:
+                            break
+            except Exception as exc:
+                all_success = False
+                device_errors.append(f"{device_name}: {exc}")
+            finally:
+                try:
+                    await transport.close()
+                except Exception:  # noqa: BLE001 - closing is best-effort
+                    logger.debug("shell transport close failed", exc_info=True)
+
+        if all_success:
+            summary = f"Executed {len(commands)} command(s) on {len(target_devices)} host(s)"
+        else:
+            summary = f"Shell execution failed on some hosts: {'; '.join(device_errors)}"
+
+        combined_output = "\n".join(combined_output_parts)
+        return HandlerResult(
+            success=all_success,
+            error="; ".join(device_errors) if device_errors else None,
+            summary=summary,
+            metrics={
+                "command_count": len(commands),
+                "device_count": len(target_devices),
+                "total_executions": executed,
+            },
+            evidence=all_evidence,
+            output={"stdout": combined_output[:MAX_CHAIN_OUTPUT_CHARS]},
+        )

@@ -1,0 +1,232 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""HttpProbeHandler: HTTP(S) endpoint checks against target devices."""
+
+import asyncio
+import logging
+import time
+from typing import Any, Literal
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field
+
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
+
+logger = logging.getLogger(__name__)
+
+_SCHEME_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def parse_status_spec(spec: str) -> list[tuple[int, int]]:
+    """Parse an expected-status spec like ``200-299,301,404`` into ranges.
+
+    Raises ``ValueError`` for malformed entries.
+    """
+    ranges: list[tuple[int, int]] = []
+    for raw in spec.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if "-" in entry:
+            low_raw, high_raw = entry.split("-", 1)
+            low, high = int(low_raw), int(high_raw)
+        else:
+            low = high = int(entry)
+        if not (100 <= low <= 599 and 100 <= high <= 599 and low <= high):
+            raise ValueError(f"invalid status entry: {entry}")
+        ranges.append((low, high))
+    if not ranges:
+        raise ValueError("expected_status must list at least one status or range")
+    return ranges
+
+
+def status_matches(status: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(low <= status <= high for low, high in ranges)
+
+
+class HttpProbeConfig(BaseModel):
+    """Config for ``probe.http``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    scheme: Literal["http", "https"] = Field(
+        default="http",
+        title="Scheme",
+        json_schema_extra={"x_option_labels": {"http": "HTTP", "https": "HTTPS"}},
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        title="Port",
+        description="Defaults to 80/443 by scheme",
+    )
+    path: str = Field(
+        default="/",
+        title="Path",
+        json_schema_extra={"x_placeholder": "/health"},
+    )
+    method: Literal["GET", "HEAD", "POST"] = Field(default="GET", title="Method")
+    expected_status: str = Field(
+        default="200-399",
+        title="Expected Status",
+        description="Comma-separated status codes and ranges, e.g. 200-299,301",
+    )
+    body_contains: str = Field(
+        default="",
+        title="Body Contains (optional)",
+        description="Fail unless the response body contains this text",
+        json_schema_extra={"x_col_span": 2},
+    )
+    verify_tls: bool = Field(
+        default=True,
+        title="Verify TLS certificate",
+        json_schema_extra={"x_show_when": {"field": "scheme", "value": "https"}},
+    )
+    follow_redirects: bool = Field(default=True, title="Follow redirects")
+    timeout_sec: int = Field(default=10, ge=1, title="Timeout (sec)")
+    attempts: int = Field(
+        default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
+    )
+
+
+class HttpProbeHandler(BaseHandler):
+    """HTTP(S) endpoint check against each target device's management address."""
+
+    handler_id = "probe.http"
+    supported_kinds = [StepKind.CHECK]
+    display_name = "HTTP Check"
+    description = "Request an HTTP(S) endpoint on each target and assert status/body."
+    category = "Checks"
+    config_model = HttpProbeConfig
+    default_config = {"scheme": "http", "path": "/", "expected_status": "200-399"}
+
+    async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        target_devices = ctx.get_target_devices()
+        if not target_devices:
+            return HandlerResult(
+                success=False,
+                error="No target devices configured",
+                summary="Missing target device",
+            )
+
+        scheme = ctx.config.get("scheme", "http")
+        port = ctx.config.get("port")
+        path = ctx.config.get("path", "/") or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        method = ctx.config.get("method", "GET")
+        body_contains = ctx.config.get("body_contains", "")
+        verify_tls = bool(ctx.config.get("verify_tls", True))
+        follow_redirects = bool(ctx.config.get("follow_redirects", True))
+        timeout_sec = ctx.config.get("timeout_sec", 10)
+        attempts = min(int(ctx.config.get("attempts", 1)), 10)
+
+        try:
+            status_ranges = parse_status_spec(str(ctx.config.get("expected_status", "200-399")))
+        except ValueError as exc:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid expected_status: {exc}",
+                summary="HTTP check configuration error",
+            )
+
+        effective_port = port or _SCHEME_DEFAULT_PORTS[scheme]
+        default_port = effective_port == _SCHEME_DEFAULT_PORTS[scheme]
+
+        all_evidence: list[dict[str, Any]] = []
+        all_metrics: dict[str, Any] = {}
+        failed_devices: list[str] = []
+        success_count = 0
+
+        async with httpx.AsyncClient(
+            verify=verify_tls, follow_redirects=follow_redirects, timeout=timeout_sec
+        ) as client:
+            for device in target_devices:
+                device_id = device.get("id", "unknown")
+                device_name = device.get("name", device_id)
+                host = device.get("mgmt_host")
+                if not host:
+                    failed_devices.append(f"{device_name} (no host)")
+                    continue
+
+                netloc = host if default_port else f"{host}:{effective_port}"
+                url = f"{scheme}://{netloc}{path}"
+
+                outcome: dict[str, Any] = {}
+                for attempt in range(attempts):
+                    outcome = await self._request(client, method, url, status_ranges, body_contains)
+                    if outcome["success"]:
+                        break
+                    if attempt < attempts - 1:
+                        await asyncio.sleep(0.5)
+
+                if outcome.get("success"):
+                    success_count += 1
+                    if "latency_ms" in outcome:
+                        all_metrics[f"{device_name}_ms"] = outcome["latency_ms"]
+                else:
+                    failed_devices.append(f"{device_name} ({outcome.get('error', 'failed')})")
+
+                all_evidence.append(
+                    {
+                        "kind": "transport_meta",
+                        "name": f"http_{device_name}",
+                        "device_id": device_id,
+                        "content_json": {
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "url": url,
+                            "method": method,
+                            **outcome,
+                        },
+                    }
+                )
+
+        total = len(target_devices)
+        summary = f"http {method} {path}: {success_count}/{total} devices OK"
+        if failed_devices:
+            return HandlerResult(
+                success=False,
+                error=f"Failed: {', '.join(failed_devices)}",
+                summary=summary,
+                metrics=all_metrics,
+                evidence=all_evidence,
+            )
+        return HandlerResult(
+            success=True, summary=summary, metrics=all_metrics, evidence=all_evidence
+        )
+
+    @staticmethod
+    async def _request(
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        status_ranges: list[tuple[int, int]],
+        body_contains: str,
+    ) -> dict[str, Any]:
+        """One HTTP attempt; returns a JSON-serializable outcome dict."""
+        start = time.perf_counter()
+        try:
+            response = await client.request(method, url)
+        except httpx.HTTPError as exc:
+            return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+        latency_ms = round((time.perf_counter() - start) * 1000, 3)
+
+        if not status_matches(response.status_code, status_ranges):
+            return {
+                "success": False,
+                "status": response.status_code,
+                "latency_ms": latency_ms,
+                "error": f"unexpected status {response.status_code}",
+            }
+        if body_contains and body_contains not in response.text:
+            return {
+                "success": False,
+                "status": response.status_code,
+                "latency_ms": latency_ms,
+                "error": "body does not contain expected text",
+            }
+        return {"success": True, "status": response.status_code, "latency_ms": latency_ms}

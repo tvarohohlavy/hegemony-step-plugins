@@ -34,7 +34,7 @@ KNOWN_CHECK_TYPES = frozenset(
     {"tcp_connect", "icmp_ping", "dns_resolve", "http_health", "tls_handshake", "ssh_banner"}
 )
 #: Check types this handler can actually execute today.
-IMPLEMENTED_CHECK_TYPES = frozenset({"tcp_connect", "icmp_ping"})
+IMPLEMENTED_CHECK_TYPES = frozenset({"tcp_connect", "icmp_ping", "http_health", "dns_resolve"})
 
 # Regex patterns for parsing ping output
 LINUX_RTT_PATTERN = re.compile(r"rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+) ms")
@@ -250,12 +250,86 @@ async def _icmp_ping_probe(address: str, options: dict[str, Any]) -> ProbeResult
         )
 
 
+async def _http_health_probe(address: str, options: dict[str, Any]) -> ProbeResult:
+    """Basic HTTP health probe: GET http://address[:port]<url_path>, ok on status < 400.
+
+    The dedicated ``probe.http`` handler offers the richer contract (https,
+    methods, status specs, body matching); this keeps the connectivity
+    handler's advertised ``http_health`` check type working.
+    """
+    import httpx
+
+    port = options.get("port")
+    url_path = options.get("url_path") or "/health"
+    if not url_path.startswith("/"):
+        url_path = "/" + url_path
+    timeout_sec = options.get("timeout_ms", 5000) / 1000.0
+    netloc = address if port in (None, 80) else f"{address}:{port}"
+    url = f"http://{netloc}{url_path}"
+
+    start = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True) as client:
+            response = await client.get(url)
+    except httpx.HTTPError as exc:
+        return ProbeResult(
+            ok=False,
+            error_kind="http_error",
+            error_detail=f"{type(exc).__name__}: {exc}",
+        )
+    latency = round((time.perf_counter() - start) * 1000, 3)
+    metrics = {"connect_ms": latency, "http_status": response.status_code}
+    if response.status_code >= 400:
+        return ProbeResult(
+            ok=False,
+            metrics=metrics,
+            error_kind="http_status",
+            error_detail=f"HTTP {response.status_code}",
+        )
+    return ProbeResult(ok=True, metrics=metrics)
+
+
+async def _dns_resolve_probe(address: str, options: dict[str, Any]) -> ProbeResult:
+    """Basic DNS probe: resolve ``options['hostname']`` (fallback: the address) as A.
+
+    The dedicated ``probe.dns`` handler offers record types, custom resolvers,
+    and expected-answer assertions.
+    """
+    import dns.exception
+
+    from .dns_check import resolve_records
+
+    hostname = (options.get("hostname") or "").strip() or address
+    timeout_sec = options.get("timeout_ms", 5000) / 1000.0
+
+    start = time.perf_counter()
+    try:
+        answers = await resolve_records(hostname, "A", timeout_sec=timeout_sec)
+    except (dns.exception.DNSException, OSError) as exc:
+        return ProbeResult(
+            ok=False,
+            error_kind="dns_error",
+            error_detail=f"{type(exc).__name__}: {exc}",
+        )
+    latency = round((time.perf_counter() - start) * 1000, 3)
+    return ProbeResult(
+        ok=bool(answers),
+        metrics={"connect_ms": latency, "answers": len(answers)},
+        error_kind=None if answers else "no_answers",
+        error_detail=None if answers else f"no A records for {hostname}",
+    )
+
+
 async def _execute_probe(check_type: str, address: str, options: dict[str, Any]) -> ProbeResult:
     """Run one probe; raises ``KeyError`` for known-but-unimplemented check types."""
     if check_type == "tcp_connect":
         return await _tcp_connect_probe(address, options)
     if check_type == "icmp_ping":
         return await _icmp_ping_probe(address, options)
+    if check_type == "http_health":
+        return await _http_health_probe(address, options)
+    if check_type == "dns_resolve":
+        return await _dns_resolve_probe(address, options)
     raise KeyError(f"Check not registered: {check_type}")
 
 

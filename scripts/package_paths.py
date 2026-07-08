@@ -17,6 +17,7 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_container",
     ROOT / "plugins" / "steps_flow",
     ROOT / "plugins" / "steps_cisco_iosxe",
+    ROOT / "plugins" / "steps_shell",
 )
 
 PLUGIN_DIRS = PACKAGE_DIRS[1:]

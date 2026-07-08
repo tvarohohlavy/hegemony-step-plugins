@@ -25,7 +25,14 @@ from .contract import (
 )
 from .enums import StepKind
 from .registry import StepHandlerRegistry
-from .services import CommandResult, ContainerRuntime, HandlerServices, Transport
+from .services import (
+    CommandResult,
+    ContainerRuntime,
+    HandlerServices,
+    ShellResult,
+    ShellTransport,
+    Transport,
+)
 
 #: The entry-point group out-of-tree step-handler plugins register under.
 STEP_HANDLER_ENTRY_POINT_GROUP = "hegemony.step_handlers"
@@ -42,6 +49,8 @@ __all__ = [
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "ShellResult",
+    "ShellTransport",
     "StepHandlerRegistry",
     "StepKind",
     "Transport",

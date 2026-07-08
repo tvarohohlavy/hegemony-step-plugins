@@ -22,12 +22,17 @@ import hegemony_steps_flow
 import hegemony_steps_general
 import hegemony_steps_netcli
 import hegemony_steps_probe
+import hegemony_steps_shell
 from hegemony_step_sdk import BaseHandler, HandlerContext, StepKind
 
 # module, claimed namespace prefix (= entry-point name), expected handler ids
 WHEELS = [
     (hegemony_steps_general, "general", {"general.noop", "general.sleep"}),
-    (hegemony_steps_probe, "probe", {"probe.connectivity", "probe.wait_reachable"}),
+    (
+        hegemony_steps_probe,
+        "probe",
+        {"probe.connectivity", "probe.wait_reachable", "probe.http", "probe.dns"},
+    ),
     (
         hegemony_steps_netcli,
         "netcli",
@@ -35,6 +40,7 @@ WHEELS = [
     ),
     (hegemony_steps_evidence, "evidence", {"evidence.assert", "evidence.compare"}),
     (hegemony_steps_container, "container", {"container.run"}),
+    (hegemony_steps_shell, "shell", {"shell.execute"}),
     (hegemony_steps_flow, "flow", {"flow.run", "flow.notify", "flow.git_sync"}),
     (
         hegemony_steps_cisco_iosxe,
@@ -100,7 +106,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 18
+    assert len(all_ids) == len(set(all_ids)) == 21
 
 
 async def test_connectivity_probe_rejects_unknown_type():

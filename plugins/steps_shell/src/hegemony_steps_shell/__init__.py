@@ -2,13 +2,15 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Unauthenticated reachability probe step handlers for Hegemony.
+"""Remote shell execution step handlers for Hegemony.
 
-Outside-observation reachability probes (tcp/icmp): one-shot connectivity
-checks and stable-reachability waits. No device credentials involved.
+The remote-shell paradigm: run commands on Linux/Unix hosts over an
+exec-channel transport (SSH today; WinRM slots in behind the same
+``ShellTransport`` surface). Opt-in wheel — not auto-installed with the
+platform; installing it makes ``shell.*`` appear in the editor.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
-point name is the claimed handler-id namespace prefix (``probe``).
+point name is the claimed handler-id namespace prefix (``shell``).
 Handlers reach every platform facility through ``ctx.services``.
 """
 
@@ -16,17 +18,9 @@ from __future__ import annotations
 
 from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
-from .connectivity import ConnectivityCheckHandler
-from .dns_check import DnsProbeHandler
-from .http_check import HttpProbeHandler
-from .wait_reachable import WaitReachableHandler
+from .execute import ShellExecuteHandler
 
-ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
-    ConnectivityCheckHandler,
-    DnsProbeHandler,
-    HttpProbeHandler,
-    WaitReachableHandler,
-)
+ALL_HANDLERS: tuple[type[BaseHandler], ...] = (ShellExecuteHandler,)
 
 
 def register(registry: StepHandlerRegistry) -> None:

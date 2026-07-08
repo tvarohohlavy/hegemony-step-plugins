@@ -1,0 +1,20 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# hegemony-steps-shell
+
+Remote shell execution for Hegemony flows — the `shell.` namespace.
+
+Handlers: `shell.execute` — run commands on Linux/Unix hosts with exec-channel
+semantics (meaningful exit codes, separate stdout/stderr), optionally wrapped
+in `sh`/`bash`/`pwsh`. The transport (SSH today, WinRM planned) is resolved
+from `device.access_config` via the platform's `open_shell` service; per
+CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
+
+**Opt-in wheel**: not auto-installed with the platform. Install the released
+wheel (the demo pins it via `demo-plugin-wheels.txt`) and the handler appears
+in the flow editor — this wheel doubles as the reference for out-of-tree
+handler plugins.

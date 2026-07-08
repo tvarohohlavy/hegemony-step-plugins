@@ -76,6 +76,34 @@ class Transport(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ShellResult:
+    """Result of one exec-channel command on a remote host."""
+
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+class ShellTransport(Protocol):
+    """Remote shell-execution surface returned by :meth:`HandlerServices.open_shell`.
+
+    Exec-channel semantics (meaningful exit codes, separate stdout/stderr) —
+    distinct from :class:`Transport`'s interactive network-CLI channel. SSH
+    today; WinRM slots in behind the same surface (transport comes from
+    ``device.access_config``, never from handler ids or config).
+    """
+
+    async def run(self, command: str, *, timeout: float | None = None) -> ShellResult:
+        """Run one command on the remote host and capture its result."""
+        ...
+
+    async def close(self) -> None:
+        """Close the underlying connection (idempotent)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerRuntime:
     """Host container-execution environment served to the run_container handler."""
 
@@ -184,6 +212,20 @@ class HandlerServices(Protocol):
 
     def container_runtime(self) -> ContainerRuntime:
         """Describe the host's container-execution environment (docker binary, workspaces)."""
+        ...
+
+    async def open_shell(
+        self,
+        device: dict[str, Any],
+        *,
+        connect_timeout: float | None = None,
+    ) -> ShellTransport:
+        """Open a remote shell-execution channel to ``device``.
+
+        Credentials come from ``device.access_config`` (``ssh`` today; a
+        ``winrm`` section selects the WinRM transport once the host implements
+        it). Caller owns the transport lifecycle (``close()`` in a finally).
+        """
         ...
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:

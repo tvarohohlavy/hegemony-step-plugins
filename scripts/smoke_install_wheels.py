@@ -24,6 +24,7 @@ EXPECTED_MODULES = (
     "hegemony_steps_container",
     "hegemony_steps_flow",
     "hegemony_steps_cisco_iosxe",
+    "hegemony_steps_shell",
 )
 
 EXPECTED_ENTRY_POINTS = {
@@ -43,8 +44,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 8:
-        raise SystemExit(f"Expected 8 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != 9:
+        raise SystemExit(f"Expected 9 wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-step-wheel-smoke-"))
     try:
