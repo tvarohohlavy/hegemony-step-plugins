@@ -29,12 +29,24 @@ package = false
 [tool.uv.workspace]
 members = [
     "packages/step_sdk",
-    "plugins/step_handlers_core",
+    "plugins/steps_general",
+    "plugins/steps_probe",
+    "plugins/steps_netcli",
+    "plugins/steps_evidence",
+    "plugins/steps_container",
+    "plugins/steps_flow",
+    "plugins/steps_cisco_iosxe",
 ]
 
 [tool.uv.sources]
 hegemony-step-sdk = { workspace = true }
-hegemony-step-handlers-core = { workspace = true }
+hegemony-steps-general = { workspace = true }
+hegemony-steps-probe = { workspace = true }
+hegemony-steps-netcli = { workspace = true }
+hegemony-steps-evidence = { workspace = true }
+hegemony-steps-container = { workspace = true }
+hegemony-steps-flow = { workspace = true }
+hegemony-steps-cisco-iosxe = { workspace = true }
 
 [tool.ruff]
 target-version = "py311"
@@ -49,7 +61,13 @@ ignore = ["E501"]
 combine-as-imports = true
 known-first-party = [
     "hegemony_step_sdk",
-    "hegemony_step_handlers_core",
+    "hegemony_steps_general",
+    "hegemony_steps_probe",
+    "hegemony_steps_netcli",
+    "hegemony_steps_evidence",
+    "hegemony_steps_container",
+    "hegemony_steps_flow",
+    "hegemony_steps_cisco_iosxe",
 ]
 
 [tool.ruff.format]

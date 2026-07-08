@@ -1,0 +1,16 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# hegemony-steps-container
+
+Container execution on the worker host. Deliberately its own wheel: the
+security-sensitive handler (docker socket, privileged mode) — hardened
+deployments simply don't install it.
+
+Handlers: `container.run`.
+
+Namespace prefix (= entry-point name): `container.` — see the repo-level
+`CONVENTIONS.md` for the naming rules.

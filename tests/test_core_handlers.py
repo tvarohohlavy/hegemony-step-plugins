@@ -2,40 +2,54 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Registration and metadata smoke tests for the core handlers wheel.
+"""Registration and metadata smoke tests for the handler wheels.
 
 Deep behavioral coverage for these handlers lives in the platform repo (which
-exercises them through the installed wheel with host-bound services); this
-suite pins what the wheel itself owns: the handler set, ids, metadata, and
-config schemas.
+exercises them through the installed wheels with host-bound services); this
+suite pins what the wheels themselves own: per-wheel handler sets, namespace
+discipline, metadata, and config schemas.
 """
 
 import json
 from typing import Any
 
-import hegemony_step_handlers_core as core
-from hegemony_step_sdk import BaseHandler, StepKind
+import pytest
 
-EXPECTED_IDS = {
-    "actions.execute_cli",
-    "actions.run_container",
-    "actions.run_flow",
-    "actions.sleep",
-    "checks.assert",
-    "checks.collect_evidence",
-    "checks.compare_evidence",
-    "checks.connectivity",
-    "checks.poll_until",
-    "checks.wait_reachable_stable",
-    "hegemony.git.sync_repo",
-    "noop",
-    "notifications.send",
-    "upgrade.cleanup",
-    "upgrade.install",
-    "upgrade.preflight",
-    "upgrade.stage",
-    "upgrade.verify",
-}
+import hegemony_steps_cisco_iosxe
+import hegemony_steps_container
+import hegemony_steps_evidence
+import hegemony_steps_flow
+import hegemony_steps_general
+import hegemony_steps_netcli
+import hegemony_steps_probe
+from hegemony_step_sdk import BaseHandler, HandlerContext, StepKind
+
+# module, claimed namespace prefix (= entry-point name), expected handler ids
+WHEELS = [
+    (hegemony_steps_general, "general", {"general.noop", "general.sleep"}),
+    (hegemony_steps_probe, "probe", {"probe.connectivity", "probe.wait_reachable"}),
+    (
+        hegemony_steps_netcli,
+        "netcli",
+        {"netcli.execute", "netcli.collect_evidence", "netcli.poll_until"},
+    ),
+    (hegemony_steps_evidence, "evidence", {"evidence.assert", "evidence.compare"}),
+    (hegemony_steps_container, "container", {"container.run"}),
+    (hegemony_steps_flow, "flow", {"flow.run", "flow.notify", "flow.git_sync"}),
+    (
+        hegemony_steps_cisco_iosxe,
+        "cisco.iosxe",
+        {
+            "cisco.iosxe.upgrade.preflight",
+            "cisco.iosxe.upgrade.stage",
+            "cisco.iosxe.upgrade.install",
+            "cisco.iosxe.upgrade.verify",
+            "cisco.iosxe.upgrade.cleanup",
+        },
+    ),
+]
+
+HIDDEN_IDS = {"general.noop", "flow.git_sync"}
 
 
 class RecordingRegistry:
@@ -49,43 +63,48 @@ class RecordingRegistry:
         self.registered.append(handler_class)
 
 
-def test_register_registers_all_handlers():
+@pytest.mark.parametrize(("module", "namespace", "expected_ids"), WHEELS)
+def test_register_registers_declared_handlers(module, namespace, expected_ids):
     registry = RecordingRegistry()
-    core.register(registry)
+    module.register(registry)
     ids = {cls.handler_id for cls in registry.registered}
-    assert ids == EXPECTED_IDS
-    assert len(registry.registered) == len(EXPECTED_IDS)
+    assert ids == expected_ids
+    assert len(registry.registered) == len(expected_ids)
 
 
-def test_all_handlers_are_base_handler_subclasses():
-    for cls in core.ALL_HANDLERS:
+@pytest.mark.parametrize(("module", "namespace", "expected_ids"), WHEELS)
+def test_all_ids_stay_inside_the_claimed_namespace(module, namespace, expected_ids):
+    for cls in module.ALL_HANDLERS:
+        assert cls.handler_id.startswith(namespace + "."), cls.handler_id
+
+
+@pytest.mark.parametrize(("module", "namespace", "expected_ids"), WHEELS)
+def test_handlers_are_well_formed(module, namespace, expected_ids):
+    for cls in module.ALL_HANDLERS:
         assert issubclass(cls, BaseHandler), cls
-        assert cls.handler_id, cls
         assert cls.supported_kinds, cls
         assert all(isinstance(kind, StepKind) for kind in cls.supported_kinds), cls
-
-
-def test_all_handlers_declare_config_models_with_json_schemas():
-    for cls in core.ALL_HANDLERS:
         model = cls.config_model
         assert model is not None, cls.handler_id
         json.dumps(model.model_json_schema())
+        if cls.handler_id in HIDDEN_IDS:
+            assert cls.hidden, cls.handler_id
+        else:
+            assert not cls.hidden, cls.handler_id
+            assert cls.display_name and cls.display_name != cls.handler_id, cls.handler_id
+            assert cls.description, cls.handler_id
+            assert cls.category, cls.handler_id
 
 
-def test_visible_handlers_have_editor_metadata():
-    hidden = {cls.handler_id for cls in core.ALL_HANDLERS if cls.hidden}
-    assert hidden == {"noop", "hegemony.git.sync_repo"}
-    for cls in core.ALL_HANDLERS:
-        if cls.hidden:
-            continue
-        assert cls.display_name and cls.display_name != cls.handler_id, cls.handler_id
-        assert cls.description, cls.handler_id
-        assert cls.category, cls.handler_id
+def test_no_duplicate_ids_across_wheels():
+    all_ids: list[str] = []
+    for module, _ns, _expected in WHEELS:
+        all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
+    assert len(all_ids) == len(set(all_ids)) == 18
 
 
 async def test_connectivity_probe_rejects_unknown_type():
-    from hegemony_step_handlers_core.connectivity_check import ConnectivityCheckHandler
-    from hegemony_step_sdk import HandlerContext
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
 
     handler = ConnectivityCheckHandler()
     ctx = HandlerContext(
@@ -105,10 +124,9 @@ async def test_connectivity_probe_rejects_unknown_type():
 
 
 async def test_connectivity_tcp_probe_connection_refused():
-    from hegemony_step_handlers_core.connectivity_check import _tcp_connect_probe
+    from hegemony_steps_probe.connectivity import _tcp_connect_probe
 
-    # RFC 5737 TEST-NET address with an unroutable port would hang; use localhost
-    # with a port that is almost certainly closed for a fast refusal.
+    # Use localhost with a port that is almost certainly closed for a fast refusal.
     result = await _tcp_connect_probe("127.0.0.1", {"port": 1, "timeout_ms": 2000})
     assert result.ok is False
     assert result.error_kind in {"connection_refused", "timeout", "network_error"}

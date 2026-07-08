@@ -17,10 +17,24 @@ from package_paths import ROOT
 
 EXPECTED_MODULES = (
     "hegemony_step_sdk",
-    "hegemony_step_handlers_core",
+    "hegemony_steps_general",
+    "hegemony_steps_probe",
+    "hegemony_steps_netcli",
+    "hegemony_steps_evidence",
+    "hegemony_steps_container",
+    "hegemony_steps_flow",
+    "hegemony_steps_cisco_iosxe",
 )
 
-EXPECTED_ENTRY_POINTS = {"core"}
+EXPECTED_ENTRY_POINTS = {
+    "general",
+    "probe",
+    "netcli",
+    "evidence",
+    "container",
+    "flow",
+    "cisco.iosxe",
+}
 
 
 def _python_bin(venv_dir: Path) -> Path:
@@ -29,8 +43,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 2:
-        raise SystemExit(f"Expected 2 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != 8:
+        raise SystemExit(f"Expected 8 wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-step-wheel-smoke-"))
     try:
