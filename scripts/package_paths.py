@@ -19,6 +19,7 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_cisco_iosxe",
     ROOT / "plugins" / "steps_shell",
     ROOT / "probes" / "probe_net",
+    ROOT / "transports" / "transport_netmiko",
 )
 
 # Everything except the SDK (index 0) pins hegemony-step-sdk and is version-locked to it.

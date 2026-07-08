@@ -39,20 +39,31 @@ from .services import (
     ShellTransport,
     Transport,
 )
+from .transports import (
+    DEFAULT_DEVICE_MGMT_PORT,
+    TRANSPORT_ENTRY_POINT_GROUP,
+    ConnectionCancellationRegistry,
+    DeviceConnectionSpec,
+    TransportRegistry,
+)
 
 #: The entry-point group out-of-tree step-handler plugins register under.
 STEP_HANDLER_ENTRY_POINT_GROUP = "hegemony.step_handlers"
 
 __all__ = [
+    "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "MAX_CHAIN_OUTPUT_CHARS",
     "PROBE_ENTRY_POINT_GROUP",
     "SDK_ABI_VERSION",
     "STEP_HANDLER_ENTRY_POINT_GROUP",
+    "TRANSPORT_ENTRY_POINT_GROUP",
     "BaseHandler",
     "BaseProbe",
     "CommandResult",
+    "ConnectionCancellationRegistry",
     "ContainerRuntime",
+    "DeviceConnectionSpec",
     "HandlerContext",
     "HandlerResult",
     "HandlerServices",
@@ -64,6 +75,7 @@ __all__ = [
     "StepHandlerRegistry",
     "StepKind",
     "Transport",
+    "TransportRegistry",
     "__version__",
     "resolve_target_devices_for_roles",
 ]

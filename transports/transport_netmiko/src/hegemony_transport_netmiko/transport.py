@@ -1,0 +1,1146 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""Netmiko device transport (network-CLI over SSH).
+
+The ``netmiko`` implementation of the SDK ``Transport`` I/O surface, registered
+under the ``hegemony.device_transports`` entry-point group. The host constructs
+it from a resolved :class:`DeviceConnectionSpec` and injects its cancellation
+registry, so this wheel never touches the platform's secret pipeline or
+settings.
+"""
+
+import asyncio
+import contextlib
+import logging
+import time
+from dataclasses import dataclass
+from functools import partial
+from typing import Any
+
+from hegemony_step_sdk import ConnectionCancellationRegistry, DeviceConnectionSpec
+
+try:
+    from netmiko import ConnectHandler
+    from netmiko.exceptions import (
+        NetmikoAuthenticationException,
+        NetmikoTimeoutException,
+    )
+except ImportError:
+    # Netmiko unavailable - provide stubs for type checking
+    ConnectHandler: Any = None
+    NetmikoAuthenticationException: type[Exception] = Exception
+    NetmikoTimeoutException: type[Exception] = Exception
+
+logger = logging.getLogger(__name__)
+
+
+class _NullCancellationRegistry:
+    """No-op cancellation registry used when the host tracks no cancellation."""
+
+    def register(self, key: str | None, connection: Any) -> None:  # noqa: D102
+        pass
+
+    def unregister(self, key: str | None, connection: Any) -> None:  # noqa: D102
+        pass
+
+    def is_cancelled(self, key: str | None) -> bool:  # noqa: D102
+        return False
+
+
+_NULL_CANCELLATION = _NullCancellationRegistry()
+
+# Common Cisco IOS-XE error patterns in command output
+CISCO_ERROR_PATTERNS = [
+    "% Invalid input detected",
+    "% Incomplete command",
+    "% Ambiguous command",
+    "% Unknown command",
+    "% Bad IP address",
+    "% Invalid range",
+    "% Permission denied",
+    "% Access denied",
+    "% Authorization failed",
+    "% This command is not authorized",
+    "% Error in authentication",
+    "% Interface does not exist",
+    "Command rejected",
+    "Command authorization failed",
+    "Invalid input:",
+    "Translating",  # DNS lookup for invalid command
+]
+
+
+def _detect_cli_error(output: str) -> str | None:
+    """Detect CLI error patterns in command output.
+
+    Returns the error message if an error pattern is found, None otherwise.
+    """
+    if not output:
+        return None
+
+    for pattern in CISCO_ERROR_PATTERNS:
+        if pattern in output:
+            # Extract a meaningful error snippet (first line with the pattern)
+            for line in output.splitlines():
+                if pattern in line:
+                    return line.strip()
+            return pattern
+    return None
+
+
+def _safe_disconnect(connection) -> None:
+    """Safely disconnect a Netmiko connection, suppressing all errors.
+
+    Netmiko's disconnect() and Paramiko's close() can raise decode errors
+    when reading from a closed connection. We use socket-level shutdown
+    to forcefully close without triggering any reads.
+    """
+    if not connection:
+        return
+
+    try:
+        # Get the underlying socket and shut it down forcefully
+        # This prevents any read attempts that could trigger decode errors
+        transport = getattr(connection, "remote_conn_pre", None)
+        if transport is not None:
+            sock = getattr(transport, "sock", None)
+            if sock is not None:
+                try:
+                    import socket
+
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    # Ignore shutdown errors - socket may already be closed or in error state
+                    pass
+                with contextlib.suppress(Exception):
+                    sock.close()
+
+            # Stop the transport thread
+            with contextlib.suppress(Exception):
+                transport.close()
+
+        # Close the channel if it exists
+        channel = getattr(connection, "remote_conn", None)
+        if channel is not None:
+            with contextlib.suppress(Exception):
+                channel.close()
+
+    except Exception:
+        # Final catch-all
+        pass
+
+
+@dataclass
+class SSHResult:
+    """Result from SSH command execution."""
+
+    command: str
+    output: str
+    exit_code: int
+    error: str | None = None
+    latency_ms: float = 0.0
+
+
+# Map inventory platform strings to Netmiko device_type values.
+PLATFORM_TO_NETMIKO = {
+    "ios-xe": "cisco_ios",
+    "ios-xr": "cisco_xr",
+    "eos": "arista_eos",
+    "junos": "juniper_junos",
+}
+
+
+class SSHTransport:
+    """SSH transport client for network device CLI access using Netmiko."""
+
+    #: check_type-style id claimed under the hegemony.device_transports group.
+    transport_id = "netmiko"
+
+    def __init__(
+        self,
+        spec: DeviceConnectionSpec,
+        *,
+        cancellation_registry: ConnectionCancellationRegistry | None = None,
+        step_run_id: str | None = None,
+    ):
+        """Initialize the netmiko transport from a resolved connection spec.
+
+        Args:
+            spec: Fully-resolved connection parameters (credentials already
+                resolved by the host).
+            cancellation_registry: Host registry used to force-close live
+                connections on cancellation; a no-op registry is used when None.
+            step_run_id: Key under which connections register for cancellation.
+        """
+        if ConnectHandler is None:
+            raise ImportError(
+                "netmiko is required for the netmiko transport. Install with: pip install netmiko"
+            )
+
+        self.host = spec.host
+        self.port = spec.port
+        self.step_run_id = step_run_id
+        self._cancellation_registry: ConnectionCancellationRegistry = (
+            cancellation_registry if cancellation_registry is not None else _NULL_CANCELLATION
+        )
+
+        self.username = spec.username or None
+        self.password = spec.password
+        self.secret = spec.enable_secret
+
+        # Validate username is provided (fail fast)
+        if not self.username:
+            raise ValueError("SSH username required (device access_config.ssh.username_ref)")
+
+        self.platform = spec.platform
+        self.device_type = PLATFORM_TO_NETMIKO.get(spec.platform, "cisco_ios")
+        self.connect_timeout = spec.connect_timeout
+        self.command_timeout = spec.command_timeout
+
+    def _get_connection_params(self) -> dict[str, Any]:
+        """Get Netmiko connection parameters."""
+        params = {
+            "device_type": self.device_type,
+            "host": self.host,
+            "port": self.port,
+            "username": self.username,
+            "password": self.password,
+            "timeout": self.connect_timeout,
+            "global_delay_factor": 1,
+            "fast_cli": True,
+        }
+        if self.secret:
+            params["secret"] = self.secret
+        return params
+
+    def _is_config_command_set(self, commands: list[str]) -> bool:
+        """
+        Check if commands are a configuration command set.
+
+        Config commands start with 'configure terminal' and end with 'end' or 'exit'.
+        """
+        if not commands:
+            return False
+        first_cmd = commands[0].strip().lower()
+        return first_cmd in ("configure terminal", "conf t", "config t")
+
+    def _execute_commands_sync(self, commands: list[str]) -> list[SSHResult]:
+        """
+        Execute commands synchronously using Netmiko.
+
+        This runs in a thread pool to avoid blocking the event loop.
+        Automatically detects config mode vs show commands and uses
+        appropriate Netmiko methods.
+        """
+        results: list[SSHResult] = []
+        connection = None
+
+        try:
+            # Connect to device
+            logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
+            connect_start = time.perf_counter()
+            assert ConnectHandler is not None  # Validated in __init__
+            connection = ConnectHandler(**self._get_connection_params())
+            connect_time = (time.perf_counter() - connect_start) * 1000
+            logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
+
+            # Register connection for cancellation support
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            # Enter enable mode if we have a secret
+            if self.secret:
+                connection.enable()
+
+            # Check if this is a config command set
+            if self._is_config_command_set(commands):
+                # Use send_config_set for configuration commands
+                # Extract just the config commands (skip 'configure terminal' and 'end'/'write memory')
+                config_commands = []
+                config_positions: list[int] = []
+                post_commands = []
+                post_positions: list[int] = []
+                config_failed = False
+                in_config = False
+
+                for idx, cmd in enumerate(commands):
+                    cmd_lower = cmd.strip().lower()
+                    if cmd_lower in ("configure terminal", "conf t", "config t"):
+                        in_config = True
+                        continue
+                    elif cmd_lower in ("end", "exit") and in_config:
+                        in_config = False
+                        continue
+                    elif cmd_lower.startswith("write") or cmd_lower.startswith("copy run"):
+                        post_commands.append(cmd)
+                        post_positions.append(idx)
+                    elif in_config:
+                        config_commands.append(cmd)
+                        config_positions.append(idx)
+                    else:
+                        post_commands.append(cmd)
+                        post_positions.append(idx)
+
+                # Execute config commands as a set
+                if config_commands:
+                    start = time.perf_counter()
+                    try:
+                        output = connection.send_config_set(
+                            config_commands,
+                            read_timeout=self.command_timeout,
+                            cmd_verify=False,
+                        )
+                        latency_ms = (time.perf_counter() - start) * 1000
+
+                        # Guard against None output
+                        if output is None:
+                            output = ""
+
+                        config_error = _detect_cli_error(output)
+                        config_failed = config_error is not None
+
+                        # Attach the full config-set session output to exactly
+                        # one result — the LAST config command — tracked by a
+                        # one-shot flag. Comparing by value (cmd == config_commands[-1])
+                        # is unsafe because duplicate values (e.g. blank lines from
+                        # Jinja {% endif %}) all match the trailing entry and would
+                        # duplicate the session text in the evidence artifact.
+                        config_seen = 0
+                        config_total = len(config_commands)
+                        config_position_set = set(config_positions)
+                        # Create results for each original command
+                        for idx, cmd in enumerate(commands):
+                            cmd_lower = cmd.strip().lower()
+                            if cmd_lower in (
+                                "configure terminal",
+                                "conf t",
+                                "config t",
+                                "end",
+                                "exit",
+                            ):
+                                results.append(
+                                    SSHResult(
+                                        command=cmd,
+                                        output="",
+                                        exit_code=0,
+                                        latency_ms=latency_ms / len(commands),
+                                    )
+                                )
+                            elif idx in config_position_set:
+                                config_seen += 1
+                                is_last_config = config_seen == config_total
+                                results.append(
+                                    SSHResult(
+                                        command=cmd,
+                                        output=(output if is_last_config else ""),
+                                        exit_code=1 if config_error else 0,
+                                        error=config_error,
+                                        latency_ms=latency_ms / len(config_commands),
+                                    )
+                                )
+                        if config_error:
+                            logger.error(f"Config set returned CLI error: {config_error}")
+                        else:
+                            logger.info(
+                                f"Config set executed in {latency_ms:.0f}ms: {config_commands}"
+                            )
+                    except Exception as e:
+                        latency_ms = (time.perf_counter() - start) * 1000
+                        post_position_set = set(post_positions)
+                        config_failed = True
+                        logger.error(f"Config set failed: {e}")
+                        for idx, cmd in enumerate(commands):
+                            if idx not in post_position_set:
+                                results.append(
+                                    SSHResult(
+                                        command=cmd,
+                                        output="",
+                                        exit_code=-1,
+                                        error=str(e),
+                                        latency_ms=latency_ms / len(commands),
+                                    )
+                                )
+
+                # Execute post-config commands (write memory, etc.)
+                if not config_failed:
+                    for cmd in post_commands:
+                        start = time.perf_counter()
+                        try:
+                            if not cmd.strip():
+                                connection.write_channel("\n")
+                                raw_output = connection.read_channel()
+                            else:
+                                raw_output = connection.send_command(
+                                    cmd,
+                                    read_timeout=self.command_timeout,
+                                    strip_prompt=True,
+                                    strip_command=True,
+                                )
+                            latency_ms = (time.perf_counter() - start) * 1000
+
+                            # Ensure output is always a string
+                            output: str = str(raw_output) if raw_output is not None else ""
+
+                            results.append(
+                                SSHResult(
+                                    command=cmd,
+                                    output=output,
+                                    exit_code=0,
+                                    latency_ms=latency_ms,
+                                )
+                            )
+                            logger.info(
+                                f"Post-config command '{cmd}' completed in {latency_ms:.0f}ms"
+                            )
+                        except Exception as e:
+                            latency_ms = (time.perf_counter() - start) * 1000
+                            results.append(
+                                SSHResult(
+                                    command=cmd,
+                                    output="",
+                                    exit_code=-1,
+                                    error=str(e),
+                                    latency_ms=latency_ms,
+                                )
+                            )
+                            logger.error(f"Post-config command '{cmd}' failed: {e}")
+            else:
+                # Execute show/exec commands individually
+                for command in commands:
+                    start = time.perf_counter()
+                    try:
+                        if not command.strip():
+                            connection.write_channel("\n")
+                            raw_output = connection.read_channel()
+                        else:
+                            raw_output = connection.send_command(
+                                command,
+                                read_timeout=self.command_timeout,
+                                strip_prompt=True,
+                                strip_command=True,
+                            )
+                        latency_ms = (time.perf_counter() - start) * 1000
+
+                        # Ensure output is always a string
+                        output: str
+                        if raw_output is None:
+                            output = ""
+                            logger.warning(
+                                f"Command '{command}' returned None output (connection issue?)"
+                            )
+                        else:
+                            output = str(raw_output)
+
+                        # Check for CLI error patterns in output
+                        cli_error = None if not command.strip() else _detect_cli_error(output)
+                        if cli_error:
+                            results.append(
+                                SSHResult(
+                                    command=command,
+                                    output=output,
+                                    exit_code=1,  # Non-zero for CLI error
+                                    error=cli_error,
+                                    latency_ms=latency_ms,
+                                )
+                            )
+                            logger.warning(f"Command '{command}' returned CLI error: {cli_error}")
+                        else:
+                            results.append(
+                                SSHResult(
+                                    command=command,
+                                    output=output,
+                                    exit_code=0,
+                                    latency_ms=latency_ms,
+                                )
+                            )
+                            logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+                    except Exception as e:
+                        latency_ms = (time.perf_counter() - start) * 1000
+                        results.append(
+                            SSHResult(
+                                command=command,
+                                output="",
+                                exit_code=-1,
+                                error=str(e),
+                                latency_ms=latency_ms,
+                            )
+                        )
+                        logger.error(f"Command '{command}' failed: {e}")
+
+        except NetmikoAuthenticationException as e:
+            logger.error(f"Authentication failed to {self.host}: {e}")
+            for command in commands:
+                results.append(
+                    SSHResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=f"Authentication failed: {e}",
+                        latency_ms=0.0,
+                    )
+                )
+        except NetmikoTimeoutException as e:
+            logger.error(f"Connection timeout to {self.host}: {e}")
+            for command in commands:
+                results.append(
+                    SSHResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=f"Connection timeout: {e}",
+                        latency_ms=0.0,
+                    )
+                )
+        except Exception as e:
+            logger.error(f"SSH connection to {self.host}:{self.port} failed: {e}")
+            for command in commands:
+                results.append(
+                    SSHResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=f"SSH connection failed: {e}",
+                        latency_ms=0.0,
+                    )
+                )
+        finally:
+            # Unregister from cancellation registry before disconnect
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            _safe_disconnect(connection)
+
+        return results
+
+    def _scp_put_sync(
+        self,
+        *,
+        local_path: str,
+        dest_fs: str,
+        dest_filename: str,
+        overwrite: bool = False,
+    ) -> dict:
+        """
+        Transfer file to device using SCP (sync version for thread pool).
+
+        Uses Netmiko's file_transfer functionality.
+        """
+        from netmiko import file_transfer
+
+        connection = None
+        start_time = time.perf_counter()
+
+        try:
+            logger.info(f"SCP upload to {self.host}: {local_path} -> {dest_fs}{dest_filename}")
+            assert ConnectHandler is not None  # Validated in __init__
+            connection = ConnectHandler(**self._get_connection_params())
+
+            # Register connection for cancellation support
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            # Enter enable mode if we have a secret
+            if self.secret:
+                connection.enable()
+
+            # Perform file transfer
+            transfer_result = file_transfer(
+                connection,
+                source_file=local_path,
+                dest_file=dest_filename,
+                file_system=dest_fs,
+                direction="put",
+                overwrite_file=overwrite,
+            )
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+            return {
+                "transferred": transfer_result.get("file_transferred", False),
+                "verified": transfer_result.get("file_verified", False),
+                "exists": transfer_result.get("file_exists", False),
+                "elapsed_ms": elapsed_ms,
+            }
+
+        except Exception as e:
+            logger.error(f"SCP transfer to {self.host} failed: {e}")
+            raise
+        finally:
+            # Unregister from cancellation registry before disconnect
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            _safe_disconnect(connection)
+
+    async def scp_put(
+        self,
+        *,
+        local_path: str,
+        dest_fs: str,
+        dest_filename: str,
+        overwrite: bool = False,
+    ) -> dict:
+        """
+        Transfer file to device using SCP.
+
+        Args:
+            local_path: Path to local file
+            dest_fs: Destination filesystem (e.g., 'flash:', 'bootflash:')
+            dest_filename: Filename on device
+            overwrite: Whether to overwrite if exists
+
+        Returns:
+            Dict with: transferred, verified, exists, elapsed_ms
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            partial(
+                self._scp_put_sync,
+                local_path=local_path,
+                dest_fs=dest_fs,
+                dest_filename=dest_filename,
+                overwrite=overwrite,
+            ),
+        )
+        return result
+
+    def _http_transfer_sync(
+        self,
+        *,
+        url: str,
+        dest_fs: str,
+        dest_filename: str,
+        timeout_seconds: int = 3600,
+    ) -> dict:
+        """
+        Transfer file to device using HTTP/HTTPS copy command (sync version).
+
+        Device pulls the file directly from the URL using:
+            copy https://url flash:filename
+
+        This is preferred over SCP as it doesn't require SCP server config on the device.
+
+        Args:
+            url: Presigned HTTP/HTTPS URL to the file
+            dest_fs: Destination filesystem (e.g., 'flash:', 'bootflash:')
+            dest_filename: Filename on device
+            timeout_seconds: Maximum time to wait for transfer completion
+
+        Returns:
+            Dict with: transferred, output, elapsed_ms
+        """
+        connection = None
+        start_time = time.perf_counter()
+
+        try:
+            logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
+            assert ConnectHandler is not None  # Validated in __init__
+            connection = ConnectHandler(**self._get_connection_params())
+
+            # Register connection for cancellation support
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            # Enter enable mode if we have a secret
+            if self.secret:
+                connection.enable()
+
+            # Build the copy command
+            # Format: copy http://url flash:filename
+            #
+            # NOTE: For Cisco IOS, URLs with '?' characters trigger help mode.
+            # We avoid this by using redirect URLs from the API (no query params).
+            # The API returns HTTP 302 redirect to presigned S3 URLs.
+            copy_cmd = f"copy {url} {dest_fs}{dest_filename}"
+
+            # Log the command without the full URL (may contain auth tokens)
+            safe_url = url.split("?")[0] if "?" in url else url
+            logger.info(f"Executing: copy {safe_url}... {dest_fs}{dest_filename}")
+
+            # Use write_channel directly to send the escaped command
+            # (send_command_timing might not handle Ctrl+V properly)
+            connection.write_channel(copy_cmd + "\n")
+            time.sleep(1)  # Give device time to process
+
+            # Read initial output
+            output = connection.read_channel()
+
+            # Handle potential prompts:
+            # - "Destination filename [...]?" - just press enter
+            # - "Overwrite? [confirm]" - send 'y' or '\n'
+            # - VRF selection - device specific
+
+            # Wait for prompts or progress, handle them
+            max_wait = timeout_seconds  # Use caller-provided timeout
+            poll_interval = 2
+            waited = 0
+            dest_filename_handled = False
+            overwrite_handled = False
+
+            while waited < max_wait:
+                # Check for cancellation first - exit immediately if cancelled
+                if self._cancellation_registry.is_cancelled(self.step_run_id):
+                    logger.info(f"HTTP transfer cancelled for step {self.step_run_id}")
+                    return {
+                        "transferred": False,
+                        "output": output + "\n[CANCELLED]",
+                        "elapsed_ms": (time.perf_counter() - start_time) * 1000,
+                    }
+
+                # Check for completion/error indicators FIRST (before prompt handling)
+                # This ensures we exit the loop when transfer completes or fails
+                if any(
+                    indicator in output
+                    for indicator in [
+                        "bytes copied",
+                        "%Error",
+                        "Error opening",
+                        "Invalid",
+                        "not found",
+                        "timed out",
+                        "refused",
+                        "Could not",
+                        "Incomplete command",
+                        "Broken pipe",
+                    ]
+                ):
+                    break
+
+                # Check for destination filename prompt (only handle once)
+                if "Destination filename" in output and not dest_filename_handled:
+                    logger.debug("Handling destination filename prompt")
+                    connection.write_channel("\n")
+                    time.sleep(1)
+                    output += connection.read_channel()
+                    dest_filename_handled = True
+                    continue
+
+                # Check for overwrite prompt (only handle once)
+                # Check recent output only to avoid infinite loops
+                recent_output = output[-500:] if len(output) > 500 else output
+                if not overwrite_handled and (
+                    "Overwrite?" in recent_output or "[confirm]" in recent_output.lower()
+                ):
+                    logger.debug("Handling overwrite/confirm prompt")
+                    connection.write_channel("\n")
+                    time.sleep(1)
+                    output += connection.read_channel()
+                    overwrite_handled = True
+                    continue
+
+                # Read more output
+                time.sleep(poll_interval)
+                waited += poll_interval
+                more_output = connection.read_channel()
+                if more_output:
+                    output += more_output
+                    # Log progress (last 100 chars, strip sensitive data)
+                    progress = more_output[-100:] if len(more_output) > 100 else more_output
+                    if "!" in progress:  # Progress indicator
+                        logger.debug("HTTP transfer in progress...")
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+            # Check for errors first (more specific matches)
+            error_patterns = [
+                "%Error",
+                "Error opening",
+                "Error reading",
+                "Invalid",
+                "not found",
+                "refused",
+                "Could not",
+                "Broken pipe",
+                "timed out",
+            ]
+            has_error = any(err in output for err in error_patterns)
+
+            if has_error:
+                logger.error(f"HTTP transfer failed: {output}")
+                return {
+                    "transferred": False,
+                    "output": output,
+                    "elapsed_ms": elapsed_ms,
+                }
+
+            # Check for success indicators
+            # "bytes copied" is the definitive success indicator for IOS copy
+            transferred = "bytes copied" in output.lower()
+
+            return {
+                "transferred": transferred,
+                "output": output,
+                "elapsed_ms": elapsed_ms,
+            }
+
+        except Exception as e:
+            logger.error(f"HTTP transfer to {self.host} failed: {e}")
+            raise
+        finally:
+            # Unregister from cancellation registry before disconnect
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            _safe_disconnect(connection)
+
+    async def http_transfer(
+        self,
+        *,
+        url: str,
+        dest_fs: str,
+        dest_filename: str,
+        timeout_seconds: int = 3600,
+    ) -> dict:
+        """
+        Transfer file to device using HTTP/HTTPS copy command.
+
+        Device pulls the file directly from the URL. This is preferred over SCP
+        as it doesn't require SCP server configuration on the device.
+
+        Args:
+            url: Presigned HTTP/HTTPS URL to the file
+            dest_fs: Destination filesystem (e.g., 'flash:', 'bootflash:')
+            dest_filename: Filename on device
+            timeout_seconds: Maximum time to wait for transfer completion
+
+        Returns:
+            Dict with: transferred, output, elapsed_ms
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            partial(
+                self._http_transfer_sync,
+                url=url,
+                dest_fs=dest_fs,
+                dest_filename=dest_filename,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        return result
+
+    def _execute_command_timing_sync(
+        self,
+        command: str,
+        *,
+        read_timeout: float = 120.0,
+        delay_factor: int = 2,
+        expect: list[str] | None = None,
+        answers: dict[str, str] | None = None,
+        wait_for_patterns: list[str] | None = None,
+    ) -> SSHResult:
+        """
+        Execute a command using timing mode (sync version for thread pool).
+
+        Uses send_command_timing for commands that may prompt or run long.
+        Automatically handles known prompts with configured answers.
+
+        Args:
+            wait_for_patterns: If provided, keep reading until one of these patterns
+                appears in output OR read_timeout is reached. Critical for long-running
+                commands like IOS-XE install that have long pauses between output.
+        """
+        connection = None
+        start_time = time.perf_counter()
+        combined_output = ""
+
+        try:
+            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            assert ConnectHandler is not None  # Validated in __init__
+            connection = ConnectHandler(**self._get_connection_params())
+
+            # Register connection for cancellation support
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            # Enter enable mode if we have a secret
+            if self.secret:
+                connection.enable()
+
+            # Initial command send using timing mode
+            # delay_factor controls how long to wait between read attempts - higher values
+            # wait longer before deciding the command is done (critical for install commands)
+            raw_output = connection.send_command_timing(
+                command,
+                delay_factor=delay_factor,
+                read_timeout=read_timeout,
+            )
+            # Ensure output is always a string
+            if raw_output is None:
+                logger.warning(f"Command '{command}' returned None output (connection issue?)")
+            else:
+                combined_output += str(raw_output)
+
+            # Handle prompts if answers provided (case-insensitive matching)
+            # Track which prompts have been answered to avoid repeating
+            if answers:
+                max_prompt_iterations = 10
+                iterations = 0
+                answered_prompts: set[str] = set()
+
+                while iterations < max_prompt_iterations:
+                    # Check for cancellation
+                    if self._cancellation_registry.is_cancelled(self.step_run_id):
+                        logger.info(f"Command cancelled for step {self.step_run_id}")
+                        combined_output += "\n[CANCELLED]"
+                        break
+
+                    iterations += 1
+                    prompt_matched = False
+
+                    # Check against combined_output with case-insensitive matching
+                    output_lower = combined_output.lower()
+                    for prompt_pattern, answer in answers.items():
+                        # Skip prompts we've already answered
+                        if prompt_pattern in answered_prompts:
+                            continue
+                        if prompt_pattern.lower() in output_lower:
+                            logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
+                            answered_prompts.add(prompt_pattern)
+                            raw_answer_output = connection.send_command_timing(
+                                answer,
+                                delay_factor=1,
+                                read_timeout=read_timeout,
+                            )
+                            # Ensure answer output is always a string
+                            combined_output += (
+                                str(raw_answer_output) if raw_answer_output is not None else ""
+                            )
+                            prompt_matched = True
+                            break
+
+                    if not prompt_matched:
+                        # No more prompts to answer
+                        break
+
+            # If wait_for_patterns specified, keep reading until pattern found or timeout
+            # This is critical for long-running commands like IOS-XE install that have
+            # long pauses (30-60+ seconds) between output chunks
+            if wait_for_patterns:
+                logger.info(f"Waiting for patterns: {wait_for_patterns}")
+                logger.info(
+                    f"Initial output ({len(combined_output)} chars): {combined_output[:200] if combined_output else '(empty)'}..."
+                )
+                pattern_found = False
+                read_interval = 2.0  # Check every 2 seconds
+                last_log_time = time.perf_counter()
+                log_interval = 30.0  # Log progress every 30 seconds
+                # Track prompts we've already answered in THIS wait loop
+                # Track the output length at which we answered each prompt pattern
+                # to avoid re-answering the same prompt appearing in accumulated output
+                answered_prompt_patterns: set[str] = set()
+                # Track position in output up to which we've processed prompts
+                prompt_check_start_pos = 0
+
+                # Check for prompts in initial output BEFORE entering the loop
+                # Prompts may already be present from send_command_timing
+                if answers:
+                    output_lower = combined_output.lower()
+                    for prompt_pattern, answer in answers.items():
+                        prompt_pos = output_lower.find(prompt_pattern.lower())
+                        if prompt_pos >= 0:
+                            logger.info(
+                                f"Matched prompt '{prompt_pattern}' in initial output at pos {prompt_pos}, sending '{answer}'"
+                            )
+                            answered_prompt_patterns.add(prompt_pattern.lower())
+                            connection.write_channel(answer + "\n")
+                            time.sleep(0.5)
+                    prompt_check_start_pos = len(combined_output)
+
+                while (time.perf_counter() - start_time) < read_timeout:
+                    # Check for cancellation at start of each iteration
+                    if self._cancellation_registry.is_cancelled(self.step_run_id):
+                        logger.info(f"Wait for patterns cancelled for step {self.step_run_id}")
+                        combined_output += "\n[CANCELLED]"
+                        break
+
+                    # Check if any pattern already in output
+                    for pattern in wait_for_patterns:
+                        if pattern.lower() in combined_output.lower():
+                            logger.info(f"Found expected pattern: {pattern}")
+                            pattern_found = True
+                            break
+
+                    if pattern_found:
+                        break
+
+                    # Read more from channel
+                    time.sleep(read_interval)
+                    try:
+                        more_output = connection.read_channel()
+                        if more_output:
+                            logger.debug(f"Read additional output: {len(more_output)} chars")
+                            combined_output += more_output
+
+                            # Handle prompts that appear during long-running commands
+                            # This is critical for IOS-XE install which prompts mid-execution
+                            # IMPORTANT: Only check NEW output to avoid re-answering old prompts
+                            if answers:
+                                # Only search in the new portion of output
+                                new_output_lower = combined_output[prompt_check_start_pos:].lower()
+                                for prompt_pattern, answer in answers.items():
+                                    pattern_lower = prompt_pattern.lower()
+                                    # Skip patterns we've already answered
+                                    if pattern_lower in answered_prompt_patterns:
+                                        continue
+                                    if pattern_lower in new_output_lower:
+                                        logger.info(
+                                            f"Matched prompt '{prompt_pattern}' in new output, sending '{answer}'"
+                                        )
+                                        answered_prompt_patterns.add(pattern_lower)
+                                        connection.write_channel(answer + "\n")
+                                        time.sleep(0.5)  # Brief pause after answering
+                                        break
+                                # Update the position marker
+                                prompt_check_start_pos = len(combined_output)
+
+                        # Log progress periodically so we can see what's happening
+                        current_time = time.perf_counter()
+                        if current_time - last_log_time > log_interval:
+                            elapsed = int(current_time - start_time)
+                            logger.info(
+                                f"Still waiting for patterns after {elapsed}s. "
+                                f"Output length: {len(combined_output)}, last 200 chars: "
+                                f"{combined_output[-200:] if combined_output else '(empty)'}"
+                            )
+                            last_log_time = current_time
+
+                    except Exception as read_err:
+                        logger.warning(f"Error reading channel: {read_err}")
+                        # Connection may have dropped (e.g., reboot) - that's expected
+                        break
+
+                if not pattern_found:
+                    logger.warning(
+                        f"Timeout waiting for patterns after {read_timeout}s. "
+                        f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                    )
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+            # Check for CLI error patterns
+            cli_error = _detect_cli_error(combined_output)
+            if cli_error:
+                return SSHResult(
+                    command=command,
+                    output=combined_output,
+                    exit_code=1,
+                    error=cli_error,
+                    latency_ms=elapsed_ms,
+                )
+
+            return SSHResult(
+                command=command,
+                output=combined_output,
+                exit_code=0,
+                latency_ms=elapsed_ms,
+            )
+
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"Timing command failed on {self.host}: {e}")
+            return SSHResult(
+                command=command,
+                output=combined_output,
+                exit_code=-1,
+                error=str(e),
+                latency_ms=elapsed_ms,
+            )
+        finally:
+            # Unregister from cancellation registry before disconnect
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            _safe_disconnect(connection)
+
+    async def execute_command_timing(
+        self,
+        command: str,
+        *,
+        read_timeout: float = 120.0,
+        delay_factor: int = 2,
+        expect: list[str] | None = None,
+        answers: dict[str, str] | None = None,
+        wait_for_patterns: list[str] | None = None,
+    ) -> SSHResult:
+        """
+        Execute a command using timing mode for interactive/long-running commands.
+
+        Uses send_command_timing which doesn't wait for a prompt pattern.
+        Suitable for upgrade commands that may prompt or trigger reboot.
+
+        Args:
+            command: CLI command to execute
+            read_timeout: Time to wait for output
+            delay_factor: Multiplier for inter-read delays (higher = wait longer
+                before deciding command is done). For install commands that have
+                long pauses between output, use 20-60.
+            expect: Optional list of expected patterns (for logging)
+            answers: Map of prompt patterns to answers (auto-reply to known prompts)
+            wait_for_patterns: If provided, keep reading from channel until one of
+                these patterns appears OR read_timeout is reached. Use for long-running
+                commands like 'install add file ... activate commit' that output status
+                over several minutes.
+
+        Returns:
+            SSHResult with combined output
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            partial(
+                self._execute_command_timing_sync,
+                command,
+                read_timeout=read_timeout,
+                delay_factor=delay_factor,
+                expect=expect,
+                answers=answers,
+                wait_for_patterns=wait_for_patterns,
+            ),
+        )
+        return result
+
+    async def execute_command(self, command: str) -> SSHResult:
+        """
+        Execute a single CLI command via SSH.
+
+        Args:
+            command: CLI command to execute
+
+        Returns:
+            SSHResult with command output
+        """
+        results = await self.execute_commands([command])
+        return (
+            results[0]
+            if results
+            else SSHResult(
+                command=command,
+                output="",
+                exit_code=-1,
+                error="No result returned",
+            )
+        )
+
+    async def execute_commands(self, commands: list[str]) -> list[SSHResult]:
+        """
+        Execute multiple CLI commands via SSH.
+
+        Opens a single SSH session and executes all commands sequentially.
+        Uses Netmiko for proper Cisco CLI handling (prompts, enable mode, etc.)
+
+        Args:
+            commands: List of CLI commands to execute
+
+        Returns:
+            List of SSHResult for each command
+        """
+        if not commands:
+            return []
+
+        # Run blocking Netmiko code in thread pool
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None,
+            partial(self._execute_commands_sync, commands),
+        )
+        return results

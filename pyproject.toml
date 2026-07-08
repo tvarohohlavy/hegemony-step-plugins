@@ -38,6 +38,7 @@ members = [
     "plugins/steps_cisco_iosxe",
     "plugins/steps_shell",
     "probes/probe_net",
+    "transports/transport_netmiko",
 ]
 
 [tool.uv.sources]
@@ -51,6 +52,7 @@ hegemony-steps-flow = { workspace = true }
 hegemony-steps-cisco-iosxe = { workspace = true }
 hegemony-steps-shell = { workspace = true }
 hegemony-probe-net = { workspace = true }
+hegemony-transport-netmiko = { workspace = true }
 
 [tool.ruff]
 target-version = "py311"
@@ -74,6 +76,7 @@ known-first-party = [
     "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
     "hegemony_probe_net",
+    "hegemony_transport_netmiko",
 ]
 
 [tool.ruff.format]
@@ -89,5 +92,5 @@ pythonpath = ["."]
 python-version = "3.11"
 
 [tool.ty.src]
-include = ["packages", "plugins", "probes", "tests", "scripts"]
+include = ["packages", "plugins", "probes", "transports", "tests", "scripts"]
 exclude = ["**/__pycache__", ".venv", "dist", "build"]
