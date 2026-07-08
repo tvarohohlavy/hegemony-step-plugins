@@ -205,6 +205,14 @@ class RunContainerConfig(BaseModel):
         ),
         json_schema_extra={"x_widget": "mounted-step-outputs", "x_col_span": 2},
     )
+    # Rendered by the editor's attachments widget; the selection is stored as
+    # step-level data (mounted_files on the step, resolved to ctx.mounted_files),
+    # not inside this config. Declared here so the schema-driven editor offers it.
+    mounted_files: list[str] | None = Field(
+        default=None,
+        title="Attachments",
+        json_schema_extra={"x_widget": "mounted-files", "x_advanced": True, "x_col_span": 2},
+    )
     artifacts_path: str = Field(
         default="",
         title="Artifacts mount path",
