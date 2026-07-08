@@ -20,6 +20,7 @@ import hegemony_steps_container
 import hegemony_steps_evidence
 import hegemony_steps_flow
 import hegemony_steps_general
+import hegemony_steps_monitor
 import hegemony_steps_netcli
 import hegemony_steps_probe
 import hegemony_steps_shell
@@ -53,9 +54,14 @@ WHEELS = [
             "cisco.iosxe.upgrade.cleanup",
         },
     ),
+    (
+        hegemony_steps_monitor,
+        "monitor",
+        {"monitor.connectivity", "monitor.start", "monitor.stop"},
+    ),
 ]
 
-HIDDEN_IDS = {"general.noop", "flow.git_sync"}
+HIDDEN_IDS = {"general.noop", "flow.git_sync", "monitor.start", "monitor.stop"}
 
 
 class RecordingRegistry:
@@ -106,7 +112,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 21
+    assert len(all_ids) == len(set(all_ids)) == 24
 
 
 def test_connectivity_check_type_is_registry_driven():

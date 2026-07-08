@@ -246,6 +246,38 @@ class HandlerServices(Protocol):
         """
         ...
 
+    def is_check_registered(self, check_id: str) -> bool:
+        """Whether ``check_id`` is a known, registered probe/check type.
+
+        Backs ``monitor.*`` config validation without the handler importing the
+        host probe registry.
+        """
+        ...
+
+    async def start_monitor(
+        self,
+        config: dict[str, Any],
+        resolved_targets: list[dict[str, Any]],
+        *,
+        run_id: str,
+        step_id: str | None,
+        step_run_id: str | None,
+        phase: str | None,
+    ) -> str:
+        """Start a background connectivity monitor and return its db id.
+
+        The host owns the monitor machinery (``MonitorManager`` + the engine's
+        until-join / run-cleanup semantics stay host forever); the ``monitor.*``
+        handler shells assemble ``config`` and the resolved target dicts
+        (``{instance_id, selector_index, selector_type, role, device_id,
+        address}``) and hand them here. Raises on failure.
+        """
+        ...
+
+    async def stop_monitor(self, monitor_id: str, *, reason: str = "step_requested") -> bool:
+        """Stop a running background monitor; returns whether one was stopped."""
+        ...
+
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:
         """Fetch the attachments resolved for a run (``filename``/``content`` dicts)."""
         ...

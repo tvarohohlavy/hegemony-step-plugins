@@ -25,6 +25,7 @@ EXPECTED_MODULES = (
     "hegemony_steps_flow",
     "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
+    "hegemony_steps_monitor",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
 )
@@ -38,6 +39,7 @@ EXPECTED_ENTRY_POINTS = {
     "container",
     "flow",
     "cisco.iosxe",
+    "monitor",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).
@@ -57,8 +59,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 11:
-        raise SystemExit(f"Expected 11 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != 12:
+        raise SystemExit(f"Expected 12 wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-step-wheel-smoke-"))
     try:

@@ -55,6 +55,20 @@ def test_handler_services_declares_run_probe():
     ]
 
 
+def test_handler_services_declares_monitor_methods():
+    for name in ("is_check_registered", "start_monitor", "stop_monitor"):
+        assert hasattr(sdk.HandlerServices, name), name
+    assert list(inspect.signature(sdk.HandlerServices.start_monitor).parameters) == [
+        "self",
+        "config",
+        "resolved_targets",
+        "run_id",
+        "step_id",
+        "step_run_id",
+        "phase",
+    ]
+
+
 def test_probe_registry_protocol_shape():
     assert list(inspect.signature(sdk.ProbeRegistry.register_probe).parameters) == [
         "self",

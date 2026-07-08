@@ -78,7 +78,7 @@ meaning.
 
 ## Plugin kinds and their entry-point groups
 
-Step handlers are one of several plugin kinds this repo will ship. All kinds
+Step handlers are one of several plugin kinds this repo ships. All kinds
 build on `hegemony-step-sdk` and live in **this monorepo** — a transport or
 probe wheel is useless without the exact SDK protocol version it implements,
 so they release in lockstep with the SDK (this is why they are *not* split
@@ -87,25 +87,32 @@ into per-domain repos the way inventory/notification/secret plugins are).
 | Kind | Entry-point group | Workspace dir | Wheel name |
 |------|-------------------|---------------|------------|
 | Step handlers | `hegemony.step_handlers` | `plugins/steps_*` | `hegemony-steps-<prefix>` |
-| Device transports (planned) | `hegemony.device_transports` | `transports/transport_*` | `hegemony-transport-<name>` |
-| Probes (planned) | `hegemony.probes` | `probes/probe_*` | `hegemony-probe-<name>` |
+| Device transports | `hegemony.device_transports` | `transports/transport_*` | `hegemony-transport-<name>` |
+| Probes | `hegemony.probes` | `probes/probe_*` | `hegemony-probe-<name>` |
 
 The group-name constants live in the SDK next to
 `STEP_HANDLER_ENTRY_POINT_GROUP`. The host consumes every kind the same way:
 entry-point discovery, a pin in the host's `.github/plugin-pins.json`, and a
-release line in the demo's `demo-plugin-wheels.txt`.
+release line in the demo's `demo-plugin-wheels.txt` (auto-installed kinds ship
+in the images and are omitted from the demo manifest).
 
-### Transports and probes (planned phase)
+### Transports and probes
 
-- **Device transports** implement the SDK `Transport` protocol
-  (scrapli/netmiko/asyncssh) plus platform drivers (ios-xe/ios-xr/nxos). They
-  sit *beneath* the handler layer and are selected from `device.access_config`
-  — never named in a handler id (see decision rule 3). Handlers reach them
-  through `services.connect()` / `services.open_shell()`.
-- **Probes** implement tcp/icmp/http/dns/tls checks and are consumed by BOTH
-  the one-shot `probe.*` step handlers and the host `MonitorManager` tick loop,
-  dissolving today's duplicated probe code. Once they are registry-driven, a
-  handler's `check_type` becomes registry options rather than a static enum.
-- The `monitor.*` handlers stay host-owned until `services.start_monitor` /
-  `stop_monitor` exist; MonitorManager and the engine's monitor-node semantics
-  remain host forever regardless.
+- **Device transports** implement the SDK `Transport` protocol (`netmiko`
+  today via `hegemony-transport-netmiko`; scrapli/asyncssh + platform drivers
+  later). They sit *beneath* the handler layer and are selected from
+  `device.access_config` — never named in a handler id (see decision rule 3).
+  Handlers reach them through `services.connect()` / `services.open_shell()`;
+  the host resolves credentials into a `DeviceConnectionSpec` and injects its
+  cancellation registry, so a transport wheel stays free of the platform's
+  secret pipeline.
+- **Probes** implement tcp/icmp/http/dns checks (`hegemony-probe-net`) and are
+  consumed by BOTH the one-shot `probe.*` step handlers (via
+  `services.run_probe`) and the host `MonitorManager` tick loop — one
+  implementation, not a copy in each. A handler's `check_type` is registry-driven
+  (the host injects the options from `x_options_source`), so a probe wheel adds a
+  check type with no config-model edit.
+- The `monitor.*` handlers live in `plugins/steps_monitor` and reach the host
+  monitor machinery through `services.start_monitor` / `stop_monitor`;
+  MonitorManager and the engine's monitor-node semantics (until-join, run
+  cleanup — keyed off the `monitor.` id prefix) remain host forever.

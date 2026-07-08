@@ -4,13 +4,13 @@
 
 [project]
 name = "hegemony-steps-general"
-version = "0.1.3"
+version = "0.1.4"
 description = "General flow-utility step handlers for Hegemony (noop, sleep)"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.1.3",
+    "hegemony-step-sdk==0.1.4",
     "httpx>=0.27.0",
 ]
 

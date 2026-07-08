@@ -18,6 +18,7 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_flow",
     ROOT / "plugins" / "steps_cisco_iosxe",
     ROOT / "plugins" / "steps_shell",
+    ROOT / "plugins" / "steps_monitor",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
 )
