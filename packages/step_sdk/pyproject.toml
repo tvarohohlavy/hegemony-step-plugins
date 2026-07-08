@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-step-sdk"
+version = "0.1.0"
+description = "Public SDK for Hegemony step-handler plugins"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.11"
+# Intentionally dependency-light: pydantic only. This package must never import
+# FastAPI, SQLAlchemy, Temporal, or any Hegemony app internals so out-of-tree
+# plugin wheels can depend on it without pulling the platform. httpx appears in
+# type hints only (TYPE_CHECKING); the host provides the actual client.
+dependencies = ["pydantic>=2.7"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_step_sdk"
+module-root = "src"
