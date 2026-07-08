@@ -109,24 +109,14 @@ def test_no_duplicate_ids_across_wheels():
     assert len(all_ids) == len(set(all_ids)) == 21
 
 
-async def test_connectivity_probe_rejects_unknown_type():
-    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+def test_connectivity_check_type_is_registry_driven():
+    """check_type is a plain string marked for host enum injection, not a static Literal."""
+    from hegemony_steps_probe.connectivity import ConnectivityCheckConfig
 
-    handler = ConnectivityCheckHandler()
-    ctx = HandlerContext(
-        run_id="r",
-        flow_id="f",
-        step_run_id="sr",
-        step_id="s",
-        phase="VERIFY",
-        kind="CHECK",
-        config={"check_type": "bogus"},
-        target_roles=["primary"],
-        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
-    )
-    result = await handler.execute(ctx)
-    assert result.success is False
-    assert "Invalid check_type" in (result.error or "")
+    prop = ConnectivityCheckConfig.model_json_schema()["properties"]["check_type"]
+    assert prop.get("type") == "string"
+    assert "enum" not in prop  # the host injects options from the probe registry
+    assert prop["x_options_source"] == "probes"
 
 
 async def test_connectivity_probe_runs_through_services_run_probe():

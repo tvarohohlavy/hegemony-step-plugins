@@ -12,7 +12,7 @@ each check type rather than one copy here and one in the monitor.
 
 import asyncio
 import logging
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,29 +26,29 @@ from hegemony_step_sdk import (
 
 logger = logging.getLogger(__name__)
 
-#: Check types accepted by the flow engine (validated before probing). The
-#: runnable subset is whatever the host's probe registry provides at run time;
-#: ``run_probe`` raises for a known-but-unregistered check type.
-KNOWN_CHECK_TYPES = frozenset(
-    {"tcp_connect", "icmp_ping", "dns_resolve", "http_health", "tls_handshake", "ssh_banner"}
-)
-
 
 class ConnectivityCheckConfig(BaseModel):
     """Config for ``probe.connectivity``."""
 
     model_config = ConfigDict(extra="allow")
 
-    check_type: Literal["tcp_connect", "icmp_ping", "http_health", "dns_resolve"] = Field(
+    # Registry-driven: the selectable check types are whatever the host's
+    # ``hegemony.probes`` registry provides. The wheel declares intent via
+    # ``x_options_source`` and the host injects the enum at the metadata
+    # endpoint; ``run_probe`` enforces validity at run time. ``x_option_labels``
+    # are cosmetic — unknown ids fall back to the id string.
+    check_type: str = Field(
         default="tcp_connect",
         title="Check Type",
         json_schema_extra={
+            "x_widget": "select",
+            "x_options_source": "probes",
             "x_option_labels": {
                 "tcp_connect": "TCP Connect",
                 "icmp_ping": "ICMP Ping",
                 "http_health": "HTTP Health",
                 "dns_resolve": "DNS Resolve",
-            }
+            },
         },
     )
     port: int = Field(
@@ -124,15 +124,9 @@ class ConnectivityCheckHandler(BaseHandler):
         timeout_sec = ctx.config.get("timeout_sec", 10)
         attempts = min(ctx.config.get("attempts", 1), 10)
 
-        # Validate check type
-        if check_type not in KNOWN_CHECK_TYPES:
-            return HandlerResult(
-                success=False,
-                error=f"Invalid check_type: {check_type}",
-                summary=f"Unknown check type: {check_type}",
-            )
-
-        # Build check options based on type
+        # Build check options based on type. An unregistered check type is
+        # reported per-device below when run_probe raises KeyError — validity is
+        # the host probe registry, not a hardcoded allowlist here.
         options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
         if check_type == "tcp_connect":
             options["port"] = port
