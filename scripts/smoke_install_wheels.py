@@ -25,8 +25,10 @@ EXPECTED_MODULES = (
     "hegemony_steps_flow",
     "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
+    "hegemony_probe_net",
 )
 
+# Entry-point names under hegemony.step_handlers (claimed handler-id namespaces).
 EXPECTED_ENTRY_POINTS = {
     "general",
     "probe",
@@ -37,6 +39,11 @@ EXPECTED_ENTRY_POINTS = {
     "cisco.iosxe",
 }
 
+# Entry-point names under hegemony.probes (probe wheels).
+EXPECTED_PROBE_ENTRY_POINTS = {
+    "net",
+}
+
 
 def _python_bin(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "python"
@@ -44,8 +51,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 9:
-        raise SystemExit(f"Expected 9 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != 10:
+        raise SystemExit(f"Expected 10 wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-step-wheel-smoke-"))
     try:
@@ -70,6 +77,12 @@ names = {{entry.name for entry in entries}}
 expected = {EXPECTED_ENTRY_POINTS!r}
 missing = expected - names
 assert not missing, missing
+
+probe_entries = entry_points(group="hegemony.probes")
+probe_names = {{entry.name for entry in probe_entries}}
+probe_expected = {EXPECTED_PROBE_ENTRY_POINTS!r}
+probe_missing = probe_expected - probe_names
+assert not probe_missing, probe_missing
 """
         subprocess.run([str(python), "-c", code], check=True)
     finally:

@@ -24,6 +24,12 @@ from .contract import (
     resolve_target_devices_for_roles,
 )
 from .enums import StepKind
+from .probes import (
+    PROBE_ENTRY_POINT_GROUP,
+    BaseProbe,
+    ProbeRegistry,
+    ProbeResult,
+)
 from .registry import StepHandlerRegistry
 from .services import (
     CommandResult,
@@ -40,15 +46,19 @@ STEP_HANDLER_ENTRY_POINT_GROUP = "hegemony.step_handlers"
 __all__ = [
     "DEFAULT_DEVICE_PLATFORM",
     "MAX_CHAIN_OUTPUT_CHARS",
+    "PROBE_ENTRY_POINT_GROUP",
     "SDK_ABI_VERSION",
     "STEP_HANDLER_ENTRY_POINT_GROUP",
     "BaseHandler",
+    "BaseProbe",
     "CommandResult",
     "ContainerRuntime",
     "HandlerContext",
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "ProbeRegistry",
+    "ProbeResult",
     "ShellResult",
     "ShellTransport",
     "StepHandlerRegistry",

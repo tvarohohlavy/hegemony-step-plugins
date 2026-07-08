@@ -18,7 +18,9 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_flow",
     ROOT / "plugins" / "steps_cisco_iosxe",
     ROOT / "plugins" / "steps_shell",
+    ROOT / "probes" / "probe_net",
 )
 
+# Everything except the SDK (index 0) pins hegemony-step-sdk and is version-locked to it.
 PLUGIN_DIRS = PACKAGE_DIRS[1:]
 SDK_VERSION_FILE = ROOT / "packages" / "step_sdk" / "src" / "hegemony_step_sdk" / "_version.py"

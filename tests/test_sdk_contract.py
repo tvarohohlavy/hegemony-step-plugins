@@ -25,10 +25,16 @@ def test_public_surface():
         "StepHandlerRegistry",
         "StepKind",
         "Transport",
+        "ShellResult",
+        "ShellTransport",
+        "BaseProbe",
+        "ProbeResult",
+        "ProbeRegistry",
         "MAX_CHAIN_OUTPUT_CHARS",
         "DEFAULT_DEVICE_PLATFORM",
         "SDK_ABI_VERSION",
         "STEP_HANDLER_ENTRY_POINT_GROUP",
+        "PROBE_ENTRY_POINT_GROUP",
         "resolve_target_devices_for_roles",
     ):
         assert hasattr(sdk, name), name
@@ -36,7 +42,24 @@ def test_public_surface():
 
 def test_entry_point_group_and_abi():
     assert sdk.STEP_HANDLER_ENTRY_POINT_GROUP == "hegemony.step_handlers"
+    assert sdk.PROBE_ENTRY_POINT_GROUP == "hegemony.probes"
     assert sdk.SDK_ABI_VERSION == 1
+
+
+def test_handler_services_declares_run_probe():
+    assert list(inspect.signature(sdk.HandlerServices.run_probe).parameters) == [
+        "self",
+        "check_type",
+        "address",
+        "options",
+    ]
+
+
+def test_probe_registry_protocol_shape():
+    assert list(inspect.signature(sdk.ProbeRegistry.register_probe).parameters) == [
+        "self",
+        "probe_class",
+    ]
 
 
 def test_step_kind_values():

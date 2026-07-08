@@ -11,7 +11,7 @@ discipline, metadata, and config schemas.
 """
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +23,7 @@ import hegemony_steps_general
 import hegemony_steps_netcli
 import hegemony_steps_probe
 import hegemony_steps_shell
-from hegemony_step_sdk import BaseHandler, HandlerContext, StepKind
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerServices, StepKind
 
 # module, claimed namespace prefix (= entry-point name), expected handler ids
 WHEELS = [
@@ -129,10 +129,57 @@ async def test_connectivity_probe_rejects_unknown_type():
     assert "Invalid check_type" in (result.error or "")
 
 
-async def test_connectivity_tcp_probe_connection_refused():
-    from hegemony_steps_probe.connectivity import _tcp_connect_probe
+async def test_connectivity_probe_runs_through_services_run_probe():
+    """probe.connectivity delegates each check to the host's shared probe registry."""
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
 
-    # Use localhost with a port that is almost certainly closed for a fast refusal.
-    result = await _tcp_connect_probe("127.0.0.1", {"port": 1, "timeout_ms": 2000})
-    assert result.ok is False
-    assert result.error_kind in {"connection_refused", "timeout", "network_error"}
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            calls.append((check_type, address, options))
+            return ProbeResult(ok=True, metrics={"connect_ms": 1.2})
+
+    handler = ConnectivityCheckHandler()
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        config={"check_type": "tcp_connect", "port": 443, "timeout_sec": 3},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True
+    assert calls == [("tcp_connect", "192.0.2.1", {"timeout_ms": 3000, "port": 443})]
+
+
+async def test_connectivity_probe_reports_unsupported_check_type():
+    """A known-but-unregistered check type surfaces as a clean failure, not a crash."""
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            raise KeyError(check_type)
+
+    handler = ConnectivityCheckHandler()
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        config={"check_type": "tls_handshake", "port": 443},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is False
+    assert "not available" in (result.error or "")

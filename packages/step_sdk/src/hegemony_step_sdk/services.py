@@ -19,6 +19,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from .probes import ProbeResult
+
 if TYPE_CHECKING:
     import httpx
 
@@ -225,6 +227,22 @@ class HandlerServices(Protocol):
         Credentials come from ``device.access_config`` (``ssh`` today; a
         ``winrm`` section selects the WinRM transport once the host implements
         it). Caller owns the transport lifecycle (``close()`` in a finally).
+        """
+        ...
+
+    async def run_probe(
+        self,
+        check_type: str,
+        address: str,
+        options: dict[str, Any],
+    ) -> ProbeResult:
+        """Run a registered probe (``tcp_connect``/``icmp_ping``/``http_health``/
+        ``dns_resolve``/…) against ``address``.
+
+        The probe implementation comes from the host's ``hegemony.probes``
+        registry — the same probes the background monitor uses — so one-shot
+        ``probe.*`` handlers share a single implementation with monitors.
+        Raises ``KeyError`` if ``check_type`` is not registered.
         """
         ...
 

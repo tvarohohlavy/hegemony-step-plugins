@@ -4,6 +4,7 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
+    "hegemony-probe-net",
     "hegemony-step-plugins-workspace",
     "hegemony-step-sdk",
     "hegemony-steps-cisco-iosxe",
@@ -132,6 +133,21 @@ wheels = [
 ]
 
 [[package]]
+name = "hegemony-probe-net"
+version = "0.1.2"
+source = { editable = "probes/probe_net" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "httpx", specifier = ">=0.27.0" },
+]
+
+[[package]]
 name = "hegemony-step-plugins-workspace"
 version = "0.1.0"
 source = { virtual = "." }
@@ -164,7 +180,7 @@ dev = [
 
 [[package]]
 name = "hegemony-step-sdk"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "packages/step_sdk" }
 dependencies = [
     { name = "pydantic" },
@@ -175,7 +191,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
 
 [[package]]
 name = "hegemony-steps-cisco-iosxe"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_cisco_iosxe" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -190,7 +206,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-container"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_container" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -205,7 +221,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-evidence"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_evidence" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -220,7 +236,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-flow"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_flow" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -235,7 +251,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-general"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_general" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -250,7 +266,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-netcli"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_netcli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -265,7 +281,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-probe"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_probe" }
 dependencies = [
     { name = "dnspython" },
@@ -282,7 +298,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-shell"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "plugins/steps_shell" }
 dependencies = [
     { name = "hegemony-step-sdk" },
