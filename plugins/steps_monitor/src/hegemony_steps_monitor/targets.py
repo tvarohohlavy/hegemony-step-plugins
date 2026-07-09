@@ -14,6 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
+#: Address kinds a role selector may resolve (string values of the host's
+#: MonitorAddressKind enum); an unknown kind is a config error, not a silent
+#: fallback to mgmt.
+VALID_ADDRESS_KINDS = frozenset({"mgmt", "primary", "loopback", "custom"})
+#: Address family preferences (host MonitorAddressFamily values).
+VALID_ADDRESS_FAMILIES = frozenset({"auto", "ipv4", "ipv6"})
+
 
 def extract_ip_addresses(selector: Any) -> list[str]:
     """Extract valid IPs from a ``type: ip`` selector.
@@ -64,9 +71,18 @@ def resolve_targets(
 
     Returns a list of ``{instance_id, selector_index, selector_type, role,
     device_id, address}`` dicts (``selector_type`` is ``"role"`` or ``"ip"``).
+
+    Raises:
+        ValueError: for an unknown ``address_kind`` or ``address_family`` —
+            a typo must fail the step, not silently monitor the wrong address.
     """
     targets: list[dict[str, Any]] = []
     address_kind = config.get("address_kind", "mgmt")
+    if address_kind not in VALID_ADDRESS_KINDS:
+        raise ValueError(f"Invalid address_kind: {address_kind!r}")
+    address_family = config.get("address_family", "auto")
+    if address_family not in VALID_ADDRESS_FAMILIES:
+        raise ValueError(f"Invalid address_family: {address_family!r}")
 
     for idx, selector in enumerate(config.get("targets", [])):
         selector_type = selector.get("type")

@@ -16,15 +16,18 @@ class ConnectivityMonitorConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # Registry-driven: selectable check types are whatever the hegemony.probes
-    # registry provides (the metadata endpoint injects the enum from
-    # x_options_source); validated against the registry at run time.
+    # Registry-driven with a monitor twist: the host injects the options from
+    # the hegemony.probes registry INTERSECTED with its monitor check-id
+    # vocabulary ("monitor_checks" source) — the monitor pipeline persists
+    # check ids in enum-typed API/DB columns, so a probe id outside that
+    # vocabulary must not be offered here (one-shot probe.* handlers use the
+    # unrestricted "probes" source). Validated against the registry at run time.
     check_type: str = Field(
         default="tcp_connect",
         title="Check Type",
         json_schema_extra={
             "x_widget": "select",
-            "x_options_source": "probes",
+            "x_options_source": "monitor_checks",
             "x_option_labels": {
                 "tcp_connect": "TCP Connect",
                 "icmp_ping": "ICMP Ping",

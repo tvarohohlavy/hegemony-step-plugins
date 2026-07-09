@@ -21,7 +21,7 @@ transport runs is resolved from ``device.access_config``, per CONVENTIONS.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .contract import DEFAULT_DEVICE_PLATFORM
@@ -44,8 +44,9 @@ class DeviceConnectionSpec:
     host: str
     port: int = DEFAULT_DEVICE_MGMT_PORT
     username: str = ""
-    password: str = ""
-    enable_secret: str = ""
+    # Secrets are kept out of repr so a logged/traceback'd spec never leaks them.
+    password: str = field(default="", repr=False)
+    enable_secret: str = field(default="", repr=False)
     platform: str = DEFAULT_DEVICE_PLATFORM
     connect_timeout: float = 10.0
     command_timeout: float = 30.0

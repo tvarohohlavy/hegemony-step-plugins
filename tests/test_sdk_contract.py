@@ -76,6 +76,14 @@ def test_probe_registry_protocol_shape():
     ]
 
 
+def test_device_connection_spec_repr_hides_secrets():
+    spec = sdk.DeviceConnectionSpec(host="h", username="u", password="pw", enable_secret="en")
+    rendered = repr(spec)
+    assert "pw" not in rendered
+    assert "en" not in rendered
+    assert "u" in rendered  # username stays visible for debugging
+
+
 def test_step_kind_values():
     assert {kind.value for kind in sdk.StepKind} == {
         "CHECK",

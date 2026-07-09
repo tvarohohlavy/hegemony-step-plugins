@@ -51,6 +51,15 @@ def test_resolve_missing_role_yields_nothing():
     assert resolve_targets({"targets": [{"type": "role", "role": "absent"}]}, {}) == []
 
 
+def test_resolve_rejects_unknown_address_kind():
+    import pytest
+
+    with pytest.raises(ValueError, match="address_kind"):
+        resolve_targets({"address_kind": "loopbck", "targets": []}, {})
+    with pytest.raises(ValueError, match="address_family"):
+        resolve_targets({"address_family": "ipv7", "targets": []}, {})
+
+
 # ── handler shells ───────────────────────────────────────────────────────────
 
 
@@ -117,6 +126,25 @@ async def test_start_handler_requires_registered_check():
     result = await ConnectivityMonitorStartHandler().execute(ctx)
     assert result.success is False
     assert "not registered" in (result.error or "")
+
+
+async def test_start_handler_reports_invalid_address_kind_cleanly():
+    services = _FakeServices()
+    ctx = _ctx(
+        {
+            "monitor": {
+                "monitor_id": "m1",
+                "check_id": "tcp_connect",
+                "address_kind": "loopbck",
+                "targets": [{"type": "role", "role": "core"}],
+            }
+        },
+        services,
+    )
+    result = await ConnectivityMonitorStartHandler().execute(ctx)
+    assert result.success is False
+    assert "address_kind" in (result.error or "")
+    assert not services.start_calls
 
 
 async def test_stop_handler_calls_services():

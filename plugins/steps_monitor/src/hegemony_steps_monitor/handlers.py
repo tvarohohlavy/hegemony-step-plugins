@@ -64,7 +64,12 @@ class ConnectivityMonitorStartHandler(BaseHandler):
                 summary=f"Unknown check: {check_id_str}",
             )
 
-        resolved = resolve_targets(config, ctx.target_devices_by_role)
+        try:
+            resolved = resolve_targets(config, ctx.target_devices_by_role)
+        except ValueError as exc:
+            return HandlerResult(
+                success=False, error=str(exc), summary="Invalid monitor target config"
+            )
         if not resolved:
             return HandlerResult(
                 success=False,
