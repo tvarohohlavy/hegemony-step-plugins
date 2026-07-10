@@ -13,7 +13,7 @@ import tempfile
 import venv
 from pathlib import Path
 
-from package_paths import ROOT
+from package_paths import PACKAGE_DIRS, ROOT
 
 EXPECTED_MODULES = (
     "hegemony_step_sdk",
@@ -28,6 +28,8 @@ EXPECTED_MODULES = (
     "hegemony_steps_monitor",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
+    "hegemony_transport_scrapli",
+    "hegemony_transport_asyncssh",
 )
 
 # Entry-point names under hegemony.step_handlers (claimed handler-id namespaces).
@@ -50,6 +52,8 @@ EXPECTED_PROBE_ENTRY_POINTS = {
 # Entry-point names under hegemony.device_transports (transport wheels).
 EXPECTED_TRANSPORT_ENTRY_POINTS = {
     "netmiko",
+    "scrapli",
+    "asyncssh",
 }
 
 
@@ -59,8 +63,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 12:
-        raise SystemExit(f"Expected 12 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != len(PACKAGE_DIRS):
+        raise SystemExit(f"Expected {len(PACKAGE_DIRS)} wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-step-wheel-smoke-"))
     try:

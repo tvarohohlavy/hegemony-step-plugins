@@ -1,0 +1,26 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# hegemony-transport-asyncssh
+
+AsyncSSH exec-channel device transport for
+[Hegemony](https://github.com/tvarohohlavy/Hegemony).
+
+Registers the `asyncssh` transport under the `hegemony.device_transports`
+entry-point group — for server-like devices (Linux hosts, whitebox NOS,
+appliances with a real shell) where commands run on SSH **exec channels** with
+genuine exit codes, instead of the prompt-scraping network-CLI model netmiko
+and scrapli implement. Runs natively async (no thread pool). Implements the
+full SDK `Transport` surface: `execute_command(s)` via exec channels,
+`execute_command_timing` via a PTY session, `scp_put` via SFTP, and
+`http_transfer` by running `curl` on the remote host.
+
+The transport is **not** named in handler ids: `netcli.*` and other
+credentialed handlers reach it through `ctx.services.connect()`, and which
+transport runs is resolved host-side from `device.access_config`
+(`access_config.ssh.transport: "asyncssh"`). The host resolves credentials into
+a `DeviceConnectionSpec` and injects its cancellation registry, so this wheel
+never imports the platform's secret pipeline or settings.

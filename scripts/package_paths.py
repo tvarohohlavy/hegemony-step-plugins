@@ -21,6 +21,8 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_monitor",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
+    ROOT / "transports" / "transport_scrapli",
+    ROOT / "transports" / "transport_asyncssh",
 )
 
 # Everything except the SDK (index 0) pins hegemony-step-sdk and is version-locked to it.

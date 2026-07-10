@@ -98,9 +98,11 @@ in the images and are omitted from the demo manifest).
 
 ### Transports and probes
 
-- **Device transports** implement the SDK `Transport` protocol (`netmiko`
-  today via `hegemony-transport-netmiko`; scrapli/asyncssh + platform drivers
-  later). They sit *beneath* the handler layer and are selected from
+- **Device transports** implement the SDK `Transport` protocol: `netmiko`
+  (default; full surface incl. SCP/HTTP staging), `scrapli` (CLI surface;
+  staging raises `NotImplementedError`), and `asyncssh` (exec channels with
+  real exit codes, for server-like devices); platform drivers come later.
+  They sit *beneath* the handler layer and are selected from
   `device.access_config` — never named in a handler id (see decision rule 3).
   Handlers reach them through `services.connect()` / `services.open_shell()`;
   the host resolves credentials into a `DeviceConnectionSpec` and injects its
