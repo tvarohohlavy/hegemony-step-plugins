@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Scrapli device transport (network-CLI over SSH).
+"""Scrapli device transport (network-CLI over SSH, asyncssh-backed).
 
 The ``scrapli`` implementation of the SDK ``Transport`` I/O surface, registered
 under the ``hegemony.device_transports`` entry-point group. The host constructs
@@ -10,31 +10,34 @@ it from a resolved :class:`DeviceConnectionSpec` and injects its cancellation
 registry, so this wheel never touches the platform's secret pipeline or
 settings.
 
+Runs ``AsyncScrapli`` over scrapli's asyncssh transport plugin — natively async
+(no thread pool), and no paramiko in the dependency tree (scrapli's paramiko
+extra caps ``paramiko<4``, which would drag the whole install onto an old
+paramiko; asyncssh is already the platform's SSH library).
+
 Command execution (single, batch, config sets, timing mode) is implemented on
 scrapli's core network drivers; file staging (``scp_put``/``http_transfer``)
 is netmiko-only for now and raises :class:`NotImplementedError` — select the
 netmiko transport for staging steps.
 """
 
-import asyncio
 import contextlib
 import logging
 import time
 from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
 from hegemony_step_sdk import ConnectionCancellationRegistry, DeviceConnectionSpec
 
 try:
-    from scrapli import Scrapli
+    from scrapli import AsyncScrapli
     from scrapli.exceptions import (
         ScrapliAuthenticationFailed,
         ScrapliTimeout,
     )
 except ImportError:
     # Scrapli unavailable - provide stubs for type checking
-    Scrapli: Any = None
+    AsyncScrapli: Any = None
     ScrapliAuthenticationFailed: type[Exception] = Exception
     ScrapliTimeout: type[Exception] = Exception
 
@@ -96,12 +99,12 @@ def _detect_cli_error(output: str) -> str | None:
     return None
 
 
-def _safe_close(connection) -> None:
+async def _safe_close(connection) -> None:
     """Close a scrapli connection, suppressing all errors."""
     if not connection:
         return
     with contextlib.suppress(Exception):
-        connection.close()
+        await connection.close()
 
 
 @dataclass
@@ -157,10 +160,10 @@ class ScrapliTransport:
                 connections on cancellation; a no-op registry is used when None.
             step_run_id: Key under which connections register for cancellation.
         """
-        if Scrapli is None:
+        if AsyncScrapli is None:
             raise ImportError(
                 "scrapli is required for the scrapli transport. "
-                "Install with: pip install 'scrapli[paramiko]'"
+                "Install with: pip install 'scrapli[asyncssh]'"
             )
 
         self.host = spec.host
@@ -197,10 +200,9 @@ class ScrapliTransport:
             "auth_username": self.username,
             "auth_password": self.password,
             "auth_strict_key": False,
-            # The default "system" transport shells out to a local ssh binary,
-            # which worker images do not ship; paramiko is pure-python-ish and
-            # already present transitively via netmiko.
-            "transport": "paramiko",
+            # asyncssh: already the platform's SSH library, and scrapli's
+            # paramiko extra would cap paramiko <4 for the whole install.
+            "transport": "asyncssh",
             "timeout_socket": self.connect_timeout,
             "timeout_ops": self.command_timeout,
         }
@@ -211,13 +213,15 @@ class ScrapliTransport:
             params["timeout_transport"] = timeout_transport
         return params
 
-    def _open_connection(self, *, timeout_transport: float | None = None):
+    async def _open_connection(self, *, timeout_transport: float | None = None):
         """Construct and open a scrapli connection."""
-        assert Scrapli is not None  # Validated in __init__
-        connection = Scrapli(**self._get_connection_params(timeout_transport=timeout_transport))
+        assert AsyncScrapli is not None  # Validated in __init__
+        connection = AsyncScrapli(
+            **self._get_connection_params(timeout_transport=timeout_transport)
+        )
         logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
         connect_start = time.perf_counter()
-        connection.open()
+        await connection.open()
         connect_time = (time.perf_counter() - connect_start) * 1000
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection
@@ -280,19 +284,28 @@ class ScrapliTransport:
                 post_commands.append(cmd)
         return config_commands, post_commands
 
-    def _execute_commands_sync(self, commands: list[str]) -> list[ScrapliResult]:
+    async def execute_commands(self, commands: list[str]) -> list[ScrapliResult]:
         """
-        Execute commands synchronously using scrapli.
+        Execute multiple CLI commands via SSH.
 
-        This runs in a thread pool to avoid blocking the event loop.
-        Automatically detects config mode vs show commands and uses
+        Opens a single SSH session and executes all commands sequentially.
+        Automatically detects config mode vs show commands and uses the
         appropriate scrapli methods (send_configs vs send_command).
+
+        Args:
+            commands: List of CLI commands to execute
+
+        Returns:
+            List of ScrapliResult for each command
         """
+        if not commands:
+            return []
+
         results: list[ScrapliResult] = []
         connection = None
 
         try:
-            connection = self._open_connection()
+            connection = await self._open_connection()
 
             # Register connection for cancellation support
             if self.step_run_id:
@@ -303,7 +316,9 @@ class ScrapliTransport:
 
                 config_failed = False
                 if config_commands:
-                    responses = connection.send_configs(config_commands, stop_on_failed=True)
+                    responses = await connection.send_configs(
+                        config_commands, stop_on_failed=True
+                    )
                     # MultiResponse is list-like: one Response per attempted
                     # config command; with stop_on_failed a failure truncates it.
                     for cmd, response in zip(config_commands, responses, strict=False):
@@ -337,7 +352,7 @@ class ScrapliTransport:
                                 )
                             )
                             break
-                        response = connection.send_command(cmd)
+                        response = await connection.send_command(cmd)
                         results.append(self._result_from_response(cmd, response))
             else:
                 for command in commands:
@@ -351,7 +366,7 @@ class ScrapliTransport:
                         )
                         break
                     try:
-                        response = connection.send_command(command)
+                        response = await connection.send_command(command)
                         result = self._result_from_response(command, response)
                         results.append(result)
                         if result.exit_code == 0:
@@ -410,28 +425,51 @@ class ScrapliTransport:
             # Unregister from cancellation registry before disconnect
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _safe_close(connection)
+            await _safe_close(connection)
 
         return results
 
-    def _read_channel_chunk(self, connection) -> str:
-        """One bounded channel read; empty string when nothing arrived in time.
+    async def execute_command(self, command: str) -> ScrapliResult:
+        """
+        Execute a single CLI command via SSH.
 
-        A read error (connection dropped, e.g. device reboot) also returns
-        empty — the caller's deadline loop decides when to give up.
+        Args:
+            command: CLI command to execute
+
+        Returns:
+            ScrapliResult with command output
+        """
+        results = await self.execute_commands([command])
+        return (
+            results[0]
+            if results
+            else ScrapliResult(
+                command=command,
+                output="",
+                exit_code=-1,
+                error="No result returned",
+            )
+        )
+
+    async def _read_channel_chunk(self, connection) -> str | None:
+        """One bounded channel read.
+
+        Returns the decoded text (empty when nothing arrived within the poll
+        window), or None on a hard read error (connection dropped, e.g. device
+        reboot) so the caller can stop polling instead of spinning.
         """
         try:
-            chunk = connection.channel.read()
+            chunk = await connection.channel.read()
         except ScrapliTimeout:
             return ""
         except Exception as read_err:
             logger.warning(f"Error reading channel: {read_err}")
-            return ""
+            return None
         if not chunk:
             return ""
         return chunk.decode(errors="replace") if isinstance(chunk, bytes) else str(chunk)
 
-    def _execute_command_timing_sync(
+    async def execute_command_timing(
         self,
         command: str,
         *,
@@ -442,13 +480,25 @@ class ScrapliTransport:
         wait_for_patterns: list[str] | None = None,
     ) -> ScrapliResult:
         """
-        Execute a command in timing mode (sync version for thread pool).
+        Execute a command in timing mode for interactive/long-running commands.
 
         Writes the command on the raw channel and reads until quiet, a
         wait_for_pattern appears, or read_timeout — answering known prompts
         along the way. Same semantics as the netmiko transport's timing mode;
         ``delay_factor`` is accepted for surface parity but the poll cadence is
         fixed by the timing connection's transport timeout.
+
+        Args:
+            command: CLI command to execute
+            read_timeout: Overall deadline for the timing session
+            delay_factor: Accepted for parity with the netmiko transport
+            expect: Optional list of expected patterns (for logging)
+            answers: Map of prompt patterns to answers (auto-reply to known prompts)
+            wait_for_patterns: If provided, keep reading until one of these
+                patterns appears OR read_timeout is reached
+
+        Returns:
+            ScrapliResult with combined output
         """
         del delay_factor, expect  # surface parity with the netmiko transport
         connection = None
@@ -458,7 +508,7 @@ class ScrapliTransport:
         try:
             logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
             # Short per-read transport timeout so the loop below polls promptly.
-            connection = self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
+            connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
 
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
@@ -478,7 +528,10 @@ class ScrapliTransport:
                     combined_output += "\n[CANCELLED]"
                     break
 
-                chunk = self._read_channel_chunk(connection)
+                chunk = await self._read_channel_chunk(connection)
+                if chunk is None:
+                    # Hard read error: connection is gone (expected on reboot).
+                    break
                 if chunk:
                     combined_output += chunk
                     quiet_reads = 0
@@ -560,93 +613,7 @@ class ScrapliTransport:
         finally:
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _safe_close(connection)
-
-    async def execute_command_timing(
-        self,
-        command: str,
-        *,
-        read_timeout: float = 120.0,
-        delay_factor: int = 2,
-        expect: list[str] | None = None,
-        answers: dict[str, str] | None = None,
-        wait_for_patterns: list[str] | None = None,
-    ) -> ScrapliResult:
-        """
-        Execute a command in timing mode for interactive/long-running commands.
-
-        Args:
-            command: CLI command to execute
-            read_timeout: Overall deadline for the timing session
-            delay_factor: Accepted for parity with the netmiko transport
-                (the scrapli poll cadence is fixed)
-            expect: Optional list of expected patterns (for logging)
-            answers: Map of prompt patterns to answers (auto-reply to known prompts)
-            wait_for_patterns: If provided, keep reading until one of these
-                patterns appears OR read_timeout is reached
-
-        Returns:
-            ScrapliResult with combined output
-        """
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            partial(
-                self._execute_command_timing_sync,
-                command,
-                read_timeout=read_timeout,
-                delay_factor=delay_factor,
-                expect=expect,
-                answers=answers,
-                wait_for_patterns=wait_for_patterns,
-            ),
-        )
-        return result
-
-    async def execute_command(self, command: str) -> ScrapliResult:
-        """
-        Execute a single CLI command via SSH.
-
-        Args:
-            command: CLI command to execute
-
-        Returns:
-            ScrapliResult with command output
-        """
-        results = await self.execute_commands([command])
-        return (
-            results[0]
-            if results
-            else ScrapliResult(
-                command=command,
-                output="",
-                exit_code=-1,
-                error="No result returned",
-            )
-        )
-
-    async def execute_commands(self, commands: list[str]) -> list[ScrapliResult]:
-        """
-        Execute multiple CLI commands via SSH.
-
-        Opens a single SSH session and executes all commands sequentially.
-
-        Args:
-            commands: List of CLI commands to execute
-
-        Returns:
-            List of ScrapliResult for each command
-        """
-        if not commands:
-            return []
-
-        # Run blocking scrapli code in thread pool
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            None,
-            partial(self._execute_commands_sync, commands),
-        )
-        return results
+            await _safe_close(connection)
 
     async def scp_put(
         self,

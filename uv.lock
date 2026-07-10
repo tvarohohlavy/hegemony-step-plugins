@@ -595,13 +595,13 @@ version = "0.1.5"
 source = { editable = "transports/transport_scrapli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
-    { name = "scrapli", extra = ["paramiko"] },
+    { name = "scrapli", extra = ["asyncssh"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
-    { name = "scrapli", extras = ["paramiko"], specifier = ">=2024.7.30" },
+    { name = "scrapli", extras = ["asyncssh"], specifier = ">=2024.7.30" },
 ]
 
 [[package]]
@@ -1253,8 +1253,8 @@ wheels = [
 ]
 
 [package.optional-dependencies]
-paramiko = [
-    { name = "paramiko" },
+asyncssh = [
+    { name = "asyncssh" },
 ]
 
 [[package]]

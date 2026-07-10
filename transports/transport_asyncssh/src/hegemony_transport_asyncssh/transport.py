@@ -300,15 +300,20 @@ class AsyncSSHTransport:
         )
 
     @staticmethod
-    async def _read_pty_chunk(process) -> str:
-        """One bounded PTY read; empty string when nothing arrived in time."""
+    async def _read_pty_chunk(process) -> str | None:
+        """One bounded PTY read.
+
+        Returns the decoded text (empty when nothing arrived within the poll
+        window), or None on a hard read error (channel lost) so the caller can
+        stop polling instead of spinning until the deadline.
+        """
         try:
             chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=_TIMING_POLL_SECONDS)
         except TimeoutError:
             return ""
         except Exception as read_err:
             logger.warning(f"Error reading PTY: {read_err}")
-            return ""
+            return None
         if not chunk:
             return ""
         return chunk.decode(errors="replace") if isinstance(chunk, bytes) else str(chunk)
@@ -371,6 +376,9 @@ class AsyncSSHTransport:
                     break
 
                 chunk = await self._read_pty_chunk(process)
+                if chunk is None:
+                    # Hard read error: the channel is gone.
+                    break
                 if chunk:
                     combined_output += chunk
                     quiet_reads = 0
