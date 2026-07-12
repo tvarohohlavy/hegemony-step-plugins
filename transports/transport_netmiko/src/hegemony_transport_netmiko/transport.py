@@ -14,6 +14,7 @@ settings.
 import asyncio
 import contextlib
 import logging
+import socket
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -108,8 +109,6 @@ def _safe_disconnect(connection) -> None:
             sock = getattr(transport, "sock", None)
             if sock is not None:
                 try:
-                    import socket
-
                     sock.shutdown(socket.SHUT_RDWR)
                 except Exception:
                     # Ignore shutdown errors - socket may already be closed or in error state

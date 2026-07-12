@@ -165,6 +165,7 @@ class RunFlowHandler(BaseHandler):
     """Launch another committed flow from the current flow."""
 
     handler_id = "flow.run"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Run Flow"
     description = "Launch another committed flow as a child run."

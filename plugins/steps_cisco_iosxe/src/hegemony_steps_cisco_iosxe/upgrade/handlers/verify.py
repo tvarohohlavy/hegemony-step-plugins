@@ -101,6 +101,7 @@ class UpgradeVerifyHandler(BaseHandler):
     """
 
     handler_id = "cisco.iosxe.upgrade.verify"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.CHECK]
     display_name = "Upgrade: Verify"
     description = "Wait for the device to return and verify the running version."

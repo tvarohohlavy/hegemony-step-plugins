@@ -155,6 +155,7 @@ class UpgradeStageHandler(BaseHandler):
     """
 
     handler_id = "cisco.iosxe.upgrade.stage"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION, StepKind.TRANSFER]
     display_name = "Upgrade: Stage"
     description = "Transfer the upgrade image to device flash and verify integrity."

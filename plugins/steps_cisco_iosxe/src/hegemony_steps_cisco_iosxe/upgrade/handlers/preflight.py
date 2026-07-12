@@ -96,6 +96,7 @@ class UpgradePreflightHandler(BaseHandler):
     """
 
     handler_id = "cisco.iosxe.upgrade.preflight"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.CHECK]
     display_name = "Upgrade: Preflight"
     description = "Validate devices are ready for upgrade (space, image, install mode)."

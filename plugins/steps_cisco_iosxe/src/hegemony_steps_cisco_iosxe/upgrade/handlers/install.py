@@ -99,6 +99,7 @@ class UpgradeInstallHandler(BaseHandler):
     """
 
     handler_id = "cisco.iosxe.upgrade.install"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Upgrade: Install"
     description = "Install and activate the staged image (may reload the device)."

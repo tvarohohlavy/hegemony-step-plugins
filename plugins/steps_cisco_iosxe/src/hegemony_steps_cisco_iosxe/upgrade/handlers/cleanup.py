@@ -80,6 +80,7 @@ class UpgradeCleanupHandler(BaseHandler):
     """
 
     handler_id = "cisco.iosxe.upgrade.cleanup"
+    default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION]
     display_name = "Upgrade: Cleanup"
     description = "Remove inactive packages/old images after a successful upgrade."

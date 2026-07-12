@@ -238,6 +238,11 @@ class BaseHandler(ABC):
     # Hidden handlers stay registered and executable (existing flow definitions
     # keep resolving) but are omitted from editor pickers — internal handlers.
     hidden: bool = False
+    # Built-in step timeout for this handler when neither the step policy nor
+    # the flow sets one. Long-running handlers (device upgrades, child flows)
+    # declare hours here; the engine also derives its heartbeat treatment from
+    # it, instead of string-matching on handler ids. None -> engine default.
+    default_timeout_seconds: int | None = None
     # Which target selectors the editor offers for this handler's steps.
     targeting: HandlerTargeting = HandlerTargeting()
     # Pydantic model describing the handler's config: the single source for UI
