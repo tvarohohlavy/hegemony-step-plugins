@@ -93,7 +93,7 @@ class ExecuteCLIActionHandler(BaseHandler):
                 continue
 
             try:
-                ssh = services.connect(device)
+                ssh = services.connect(device, platform=device.get("platform"))
                 # Execute all commands together so config mode detection works
                 results = await ssh.execute_commands(commands)
 

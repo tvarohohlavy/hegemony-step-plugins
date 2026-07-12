@@ -101,7 +101,7 @@ class CollectEvidenceHandler(BaseHandler):
                 continue
 
             try:
-                ssh = services.connect(device)
+                ssh = services.connect(device, platform=device.get("platform"))
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:

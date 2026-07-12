@@ -129,7 +129,7 @@ class PollUntilHandler(BaseHandler):
             device_success = False
 
             try:
-                transport = services.connect(device, platform=device.get("platform", "cisco_ios"))
+                transport = services.connect(device, platform=device.get("platform"))
 
                 while attempt < max_attempts:
                     attempt += 1

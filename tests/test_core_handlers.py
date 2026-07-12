@@ -179,3 +179,50 @@ async def test_connectivity_probe_reports_unsupported_check_type():
     result = await handler.execute(ctx)
     assert result.success is False
     assert "not available" in (result.error or "")
+
+
+async def test_execute_cli_connects_with_the_device_platform():
+    """netcli.execute forwards each device's platform to services.connect.
+
+    Transports pick their driver from the spec's platform (scrapli especially),
+    so falling back to the ios-xe default for every device — the old behavior —
+    would drive non-IOS-XE devices with the wrong driver.
+    """
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    class _Result:
+        command = "show version"
+        output = "ok"
+        exit_code = 0
+        error = None
+        latency_ms = 1.0
+
+    class _Transport:
+        async def execute_commands(self, commands):
+            return [_Result() for _ in commands]
+
+    connects: list[str | None] = []
+
+    class _Services:
+        def connect(self, device, *, platform=None, **kwargs):
+            connects.append(platform)
+            return _Transport()
+
+    handler = ExecuteCLIActionHandler()
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="EXECUTE",
+        kind="ACTION",
+        config={"commands": ["show version"]},
+        target_roles=["primary"],
+        target_devices_by_role={
+            "primary": [{"id": "d1", "name": "eos1", "mgmt_host": "192.0.2.1", "platform": "eos"}]
+        },
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True
+    assert connects == ["eos"]
