@@ -287,3 +287,18 @@ class BaseHandler(ABC):
                 for error in exc.errors()
             ]
         return []
+
+
+def command_label(command: str, max_len: int = 80) -> str:
+    """Short single-line display label for a command-derived artifact name.
+
+    Script-shaped commands (multi-line bodies, long one-liners) make unwieldy
+    artifact names and download filenames; the full command stays in the
+    artifact content. Takes the first non-empty line, ellipsized to
+    ``max_len``.
+    """
+    stripped = command.strip()
+    first_line = stripped.splitlines()[0].strip() if stripped else stripped
+    if len(first_line) > max_len:
+        return first_line[: max_len - 1].rstrip() + "\u2026"
+    return first_line

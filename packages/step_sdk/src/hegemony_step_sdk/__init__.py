@@ -21,6 +21,7 @@ from .contract import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    command_label,
     resolve_target_devices_for_roles,
 )
 from .enums import StepKind
@@ -59,6 +60,7 @@ __all__ = [
     "STEP_HANDLER_ENTRY_POINT_GROUP",
     "TRANSPORT_ENTRY_POINT_GROUP",
     "BaseHandler",
+    "command_label",
     "BaseProbe",
     "CommandResult",
     "ConnectionCancellationRegistry",

@@ -15,6 +15,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    command_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,10 +166,11 @@ class ExecuteCLIActionHandler(BaseHandler):
                 else:
                     # For show/exec commands, create individual artifacts per command
                     for result in results:
+                        command_display = command_label(result.command)
                         cmd_name = (
-                            f"{result.command} ({device_name})"
+                            f"{command_display} ({device_name})"
                             if len(target_devices) > 1
-                            else result.command
+                            else command_display
                         )
                         if result.output:
                             combined_output_parts.append(result.output)

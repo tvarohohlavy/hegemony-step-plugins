@@ -13,6 +13,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     StepKind,
+    command_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ class CollectEvidenceHandler(BaseHandler):
                     all_evidence.append(
                         {
                             "kind": "cli_output",
-                            "name": f"{device_name}:{result.command}",
+                            "name": f"{device_name}:{command_label(result.command)}",
                             "device_id": device_id,
                             "content_text": result.output,
                             "content_json": {

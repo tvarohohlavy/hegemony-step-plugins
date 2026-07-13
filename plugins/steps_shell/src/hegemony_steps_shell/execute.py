@@ -24,6 +24,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    command_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -205,8 +206,11 @@ class ShellExecuteHandler(BaseHandler):
                     if result.stdout:
                         combined_output_parts.append(result.stdout)
 
+                    command_display = command_label(original)
                     display_name_suffix = (
-                        f"{original} ({device_name})" if len(target_devices) > 1 else original
+                        f"{command_display} ({device_name})"
+                        if len(target_devices) > 1
+                        else command_display
                     )
                     all_evidence.append(
                         {

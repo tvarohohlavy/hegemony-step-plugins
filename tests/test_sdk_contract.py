@@ -136,3 +136,19 @@ def test_base_handler_validates_with_config_model():
     assert handler.validate_config({"name": "x"}) == []
     errors = handler.validate_config({})
     assert errors and errors[0].startswith("name:")
+
+
+def test_command_label_shortens_script_shaped_commands():
+    """Artifact display names derived from commands stay one line and bounded."""
+    from hegemony_step_sdk import command_label
+
+    assert command_label("show version") == "show version"
+    # First non-empty line only
+    assert command_label("uname -a\nid\nuptime") == "uname -a"
+    # Long one-liners get ellipsized within the cap
+    long_cmd = 'FAIL=0; for t in 10.101.1.10 10.104.1.10; do ping -c 3 -W 2 "$t" || FAIL=1; done; exit $FAIL'
+    label = command_label(long_cmd)
+    assert len(label) <= 80
+    assert label.endswith("…")
+    assert label.startswith("FAIL=0; for t in")
+    assert command_label("   ") == ""
