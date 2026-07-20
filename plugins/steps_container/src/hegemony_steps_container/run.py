@@ -822,6 +822,16 @@ class RunContainerHandler(BaseHandler):
             ]
         )
 
+        # Stack discriminator: several compose stacks (dev/prod/demo) can share
+        # one host Docker daemon, and the id labels alone cannot tell their
+        # flow containers apart. The worker sets HEGEMONY_STACK_NAME (its
+        # compose project name) so stack-scoped cleanup — the platform's
+        # startup janitor and demo reset — only ever touches its own stack's
+        # containers.
+        stack_name = os.environ.get("HEGEMONY_STACK_NAME", "").strip()
+        if stack_name:
+            args.extend(["--label", f"hegemony.stack={stack_name}"])
+
         # Add env vars (filter out platform-owned variables)
         if isinstance(env_vars, dict):
             for key, val in env_vars.items():
