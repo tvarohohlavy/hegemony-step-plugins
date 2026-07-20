@@ -53,36 +53,49 @@ def test_changed_mode_inverts_exact() -> None:
 def test_ignore_patterns_strip_volatile_timers() -> None:
     """Captures differing only by timers compare equal once timers are ignored."""
     handler = _handler()
+    timers = handler._compile_ignore_patterns([_TIMER_PATTERN])
     # Without ignoring, the drifting timers always look like a change.
     passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_TIMERS_ONLY, "exact", [])
     assert passed is False
     # Ignoring the timer column, the two are identical → exact passes,
     # and 'changed' correctly reports no meaningful change.
-    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_TIMERS_ONLY, "exact", [], [_TIMER_PATTERN])
+    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_TIMERS_ONLY, "exact", [], timers)
     assert passed is True
-    passed, _ = handler._compare(
-        _ROUTE_PRE, _ROUTE_POST_TIMERS_ONLY, "changed", [], [_TIMER_PATTERN]
-    )
+    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_TIMERS_ONLY, "changed", [], timers)
     assert passed is False
 
 
 def test_ignore_patterns_keep_real_change() -> None:
     """A genuine change (a new prefix) still registers once timers are ignored."""
     handler = _handler()
-    passed, _ = handler._compare(
-        _ROUTE_PRE, _ROUTE_POST_REAL_CHANGE, "changed", [], [_TIMER_PATTERN]
-    )
+    timers = handler._compile_ignore_patterns([_TIMER_PATTERN])
+    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_REAL_CHANGE, "changed", [], timers)
     assert passed is True
-    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_REAL_CHANGE, "exact", [], [_TIMER_PATTERN])
+    passed, _ = handler._compare(_ROUTE_PRE, _ROUTE_POST_REAL_CHANGE, "exact", [], timers)
     assert passed is False
 
 
-def test_mask_ignored_removes_matches_and_tolerates_bad_regex() -> None:
+def test_compile_ignore_patterns_masks_and_tolerates_bad_regex() -> None:
     handler = _handler()
     text = "keep me\nBytes: 123\nkeep me too"
-    masked = handler._mask_ignored(text, [r"Bytes: \d+"])
+    masked = handler._mask_ignored(text, handler._compile_ignore_patterns([r"Bytes: \d+"]))
     assert "Bytes:" not in masked
     assert "keep me" in masked and "keep me too" in masked
-    # An invalid regex is skipped, not raised — the other pattern still applies.
-    masked = handler._mask_ignored(text, ["(", r"Bytes: \d+"])
-    assert "Bytes:" not in masked
+    # An invalid regex is dropped at compile time, not raised — the valid one
+    # still applies.
+    compiled = handler._compile_ignore_patterns(["(", r"Bytes: \d+"])
+    assert len(compiled) == 1
+    assert "Bytes:" not in handler._mask_ignored(text, compiled)
+
+
+def test_ignore_patterns_are_bounded() -> None:
+    """Guardrails: pattern count is capped and oversized text is left unmasked."""
+    from hegemony_steps_evidence import compare as compare_mod
+
+    handler = _handler()
+    too_many = [rf"x{i}" for i in range(compare_mod._MAX_IGNORE_PATTERNS + 5)]
+    assert len(handler._compile_ignore_patterns(too_many)) == compare_mod._MAX_IGNORE_PATTERNS
+    # Text over the cap is returned unchanged instead of running the regex.
+    big = "Bytes: 1\n" + ("y" * compare_mod._MAX_MASK_INPUT_CHARS)
+    compiled = handler._compile_ignore_patterns([r"Bytes: \d+"])
+    assert handler._mask_ignored(big, compiled) == big

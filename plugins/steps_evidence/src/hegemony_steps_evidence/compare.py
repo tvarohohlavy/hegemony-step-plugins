@@ -22,6 +22,13 @@ from hegemony_step_sdk import (
 
 logger = logging.getLogger(__name__)
 
+# Guardrails for user-supplied ``ignore_patterns``: a pathological regex run via
+# ``re.sub`` over large CLI output can backtrack catastrophically and block the
+# worker's event loop. Compile each pattern once (not per artifact), cap how many
+# run, and cap how much text they run against.
+_MAX_IGNORE_PATTERNS = 50
+_MAX_MASK_INPUT_CHARS = 1_000_000
+
 
 class CompareEvidenceConfig(BaseModel):
     """Config for ``evidence.compare``."""
@@ -149,7 +156,9 @@ class CompareEvidenceHandler(BaseHandler):
         artifact_name_pattern = ctx.config.get("artifact_name_pattern")
         comparison_type = ctx.config.get("comparison_type", "exact")
         ignore_fields = ctx.config.get("ignore_fields", [])
-        ignore_patterns = ctx.config.get("ignore_patterns", [])
+        # Compile the ignore patterns ONCE here, bounded, rather than per
+        # artifact inside the compare loop (ReDoS/perf guardrail).
+        compiled_ignore = self._compile_ignore_patterns(ctx.config.get("ignore_patterns", []))
 
         if not precheck_step_id:
             return HandlerResult(
@@ -185,6 +194,16 @@ class CompareEvidenceHandler(BaseHandler):
                     success=False,
                     error=(
                         f"No artifacts in precheck step '{precheck_step_id}' match "
+                        f"pattern '{artifact_name_pattern}'"
+                    ),
+                    summary="No artifacts matched pattern",
+                )
+            if not postcheck_artifacts:
+                return HandlerResult(
+                    success=False,
+                    error=(
+                        f"No artifacts in postcheck step "
+                        f"'{postcheck_step_id or ctx.step_id}' match "
                         f"pattern '{artifact_name_pattern}'"
                     ),
                     summary="No artifacts matched pattern",
@@ -233,7 +252,7 @@ class CompareEvidenceHandler(BaseHandler):
             )
 
             passed, diff_details = self._compare(
-                precheck_content, postcheck_content, comparison_type, ignore_fields, ignore_patterns
+                precheck_content, postcheck_content, comparison_type, ignore_fields, compiled_ignore
             )
             artifacts_compared = [artifact_name]
         else:
@@ -264,7 +283,7 @@ class CompareEvidenceHandler(BaseHandler):
                     else postcheck_by_name[name].get("content_json")
                 )
                 passed, diff = self._compare(
-                    pre_content, post_content, comparison_type, ignore_fields, ignore_patterns
+                    pre_content, post_content, comparison_type, ignore_fields, compiled_ignore
                 )
                 all_diffs[name] = {"passed": passed, "diff": diff}
                 if not passed:
@@ -292,10 +311,16 @@ class CompareEvidenceHandler(BaseHandler):
             }
         ]
 
+        # Phrase the outcome for the comparison mode: in "changed" mode a
+        # difference is the SUCCESS signal, so "matched"/"differences found"
+        # would read backwards.
+        changed_mode = comparison_type == "changed"
+        n = len(artifacts_compared)
         if passed:
+            outcome = "changed as expected" if changed_mode else "matched"
             return HandlerResult(
                 success=True,
-                summary=f"Evidence comparison passed: {len(artifacts_compared)} artifact(s) matched",
+                summary=f"Evidence comparison passed: {n} artifact(s) {outcome}",
                 evidence=evidence,
             )
         else:
@@ -304,10 +329,16 @@ class CompareEvidenceHandler(BaseHandler):
                 for d in (diff_details.values() if isinstance(diff_details, dict) else [])
                 if isinstance(d, dict) and not d.get("passed", True)
             )
+            if changed_mode:
+                error = "Evidence comparison failed: no change detected"
+                summary = f"No change in {failed_count} of {n} artifact(s)"
+            else:
+                error = "Evidence comparison failed: differences found"
+                summary = f"Pre/post check mismatch in {failed_count} of {n} artifact(s)"
             return HandlerResult(
                 success=False,
-                error="Evidence comparison failed: differences found",
-                summary=f"Pre/post check mismatch in {failed_count} of {len(artifacts_compared)} artifact(s)",
+                error=error,
+                summary=summary,
                 evidence=evidence,
             )
 
@@ -317,9 +348,13 @@ class CompareEvidenceHandler(BaseHandler):
         postcheck: Any,
         comparison_type: str,
         ignore_fields: list[str],
-        ignore_patterns: list[str] | None = None,
+        ignore_patterns: list[re.Pattern[str]] | None = None,
     ) -> tuple[bool, dict]:
-        """Compare two evidence values."""
+        """Compare two evidence values.
+
+        ``ignore_patterns`` are pre-compiled regexes (see
+        ``_compile_ignore_patterns``) applied to text evidence before comparing.
+        """
         logger.info(
             f"Comparing evidence: type={comparison_type}, precheck_type={type(precheck).__name__}, postcheck_type={type(postcheck).__name__}"
         )
@@ -389,28 +424,60 @@ class CompareEvidenceHandler(BaseHandler):
         """Remove specified fields from dictionary."""
         return {k: v for k, v in data.items() if k not in fields}
 
-    def _mask_ignored(self, text: str, patterns: list[str]) -> str:
-        """Remove every substring matching any of ``patterns`` (regex) from text.
+    def _mask_ignored(self, text: str, patterns: list[re.Pattern[str]]) -> str:
+        """Remove every substring matching any pre-compiled pattern from text.
 
         Volatile output — interface/route counters, timers, uptimes — is masked
         in place so it does not register as a difference, while the surrounding
         content (and any genuinely new lines) is preserved: a route table whose
         only real change is an added prefix still compares as changed once the
-        drifting timer columns are masked. Patterns match per line (``^``/``$``
-        anchor to line boundaries). Invalid patterns are skipped with a warning
-        rather than failing the step.
+        drifting timer columns are masked.
+
+        Oversized text is left unmasked (with a warning): running a
+        user-supplied regex over a very large blob risks pathological
+        backtracking that would block the worker, and the raw comparison is a
+        safe fallback.
         """
+        if len(text) > _MAX_MASK_INPUT_CHARS:
+            logger.warning(
+                "evidence.compare: skipping ignore_patterns on %d-char artifact "
+                "(exceeds %d-char cap) to avoid pathological regex backtracking",
+                len(text),
+                _MAX_MASK_INPUT_CHARS,
+            )
+            return text
         masked = text
         for pattern in patterns:
+            masked = pattern.sub("", masked)
+        return masked
+
+    def _compile_ignore_patterns(self, patterns: list[str]) -> list[re.Pattern[str]]:
+        """Compile ``ignore_patterns`` once, bounded and fail-soft.
+
+        Compiling once (rather than per artifact) and capping the pattern count
+        bounds the cost of user-supplied regexes run via ``re.sub`` over CLI
+        output. Non-string/empty and invalid patterns are skipped with a warning
+        instead of failing the step. ``re.MULTILINE`` makes ``^``/``$`` anchor to
+        line boundaries.
+        """
+        compiled: list[re.Pattern[str]] = []
+        if len(patterns) > _MAX_IGNORE_PATTERNS:
+            logger.warning(
+                "evidence.compare: %d ignore_patterns exceeds the cap of %d; "
+                "extra patterns are ignored",
+                len(patterns),
+                _MAX_IGNORE_PATTERNS,
+            )
+        for pattern in patterns[:_MAX_IGNORE_PATTERNS]:
             if not isinstance(pattern, str) or not pattern:
                 continue
             try:
-                masked = re.sub(pattern, "", masked, flags=re.MULTILINE)
+                compiled.append(re.compile(pattern, re.MULTILINE))
             except re.error as exc:
                 logger.warning(
                     "evidence.compare: invalid ignore pattern %r skipped: %s", pattern, exc
                 )
-        return masked
+        return compiled
 
     def _find_differences(self, a: Any, b: Any) -> list[dict]:
         """Find differences between two values."""
