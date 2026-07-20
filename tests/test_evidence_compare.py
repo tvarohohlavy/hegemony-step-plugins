@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hegemony_steps_evidence.compare import CompareEvidenceHandler
 
 # Two routing-table captures that are identical except for OSPF uptime timers
@@ -114,18 +116,22 @@ def _ctx(**config):
     return SimpleNamespace(config=config, step_id="cur", run_id="run-1", step_run_id="sr-1")
 
 
-def _handler_with(pre: list[dict], post: list[dict]) -> CompareEvidenceHandler:
+def _handler_with(
+    pre: list[dict], post: list[dict], monkeypatch: pytest.MonkeyPatch
+) -> CompareEvidenceHandler:
     """A handler whose artifact fetch returns canned pre/post lists by step id."""
     handler = _handler()
 
-    async def fake_fetch(ctx, step_id):
+    async def fake_fetch(ctx: object, step_id: str) -> list[dict]:
         return pre if step_id == "precheck" else post
 
-    handler._fetch_artifacts_for_step = fake_fetch  # type: ignore[method-assign]
+    monkeypatch.setattr(handler, "_fetch_artifacts_for_step", fake_fetch)
     return handler
 
 
-async def test_execute_pattern_selects_only_matching_artifacts() -> None:
+async def test_execute_pattern_selects_only_matching_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """artifact_name_pattern compares only the running-config, not the route table."""
     pre = [
         _artifact("dc1:show running-config", "hostname dc1"),
@@ -135,7 +141,7 @@ async def test_execute_pattern_selects_only_matching_artifacts() -> None:
         _artifact("dc1:show running-config", "hostname dc1\ninterface lo"),  # changed
         _artifact("dc1:show ip route ospf", "O 10.0.0.0/24"),  # unchanged
     ]
-    handler = _handler_with(pre, post)
+    handler = _handler_with(pre, post, monkeypatch)
     result = await handler.execute(
         _ctx(
             precheck_step_id="precheck",
@@ -149,10 +155,11 @@ async def test_execute_pattern_selects_only_matching_artifacts() -> None:
     assert result.success is True
 
 
-async def test_execute_pattern_no_precheck_match_errors() -> None:
+async def test_execute_pattern_no_precheck_match_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     handler = _handler_with(
         [_artifact("dc1:show ip route ospf", "x")],
         [_artifact("dc1:show ip route ospf", "x")],
+        monkeypatch,
     )
     result = await handler.execute(
         _ctx(
@@ -165,11 +172,12 @@ async def test_execute_pattern_no_precheck_match_errors() -> None:
     assert "precheck" in (result.error or "") and "pattern" in (result.error or "")
 
 
-async def test_execute_pattern_no_postcheck_match_errors() -> None:
+async def test_execute_pattern_no_postcheck_match_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """Symmetric check: an empty postcheck match names the postcheck side."""
     handler = _handler_with(
         [_artifact("dc1:show running-config", "x")],
         [_artifact("dc1:show ip route ospf", "y")],
+        monkeypatch,
     )
     result = await handler.execute(
         _ctx(
@@ -182,7 +190,9 @@ async def test_execute_pattern_no_postcheck_match_errors() -> None:
     assert "postcheck" in (result.error or "") and "pattern" in (result.error or "")
 
 
-async def test_execute_artifact_name_takes_precedence_over_pattern() -> None:
+async def test_execute_artifact_name_takes_precedence_over_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When both are set, the exact artifact_name wins over the glob."""
     pre = [
         _artifact("dc1:show running-config", "a"),
@@ -192,7 +202,7 @@ async def test_execute_artifact_name_takes_precedence_over_pattern() -> None:
         _artifact("dc1:show running-config", "b"),  # changed
         _artifact("dc1:show ip route ospf", "same"),  # unchanged
     ]
-    handler = _handler_with(pre, post)
+    handler = _handler_with(pre, post, monkeypatch)
     result = await handler.execute(
         _ctx(
             precheck_step_id="precheck",
@@ -206,11 +216,14 @@ async def test_execute_artifact_name_takes_precedence_over_pattern() -> None:
     assert result.success is True
 
 
-async def test_execute_single_artifact_failure_counts_one_of_one() -> None:
+async def test_execute_single_artifact_failure_counts_one_of_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression: a failed exact-artifact compare reports 1 of 1, not 0 of 1."""
     handler = _handler_with(
         [_artifact("dc1:show running-config", "a")],
         [_artifact("dc1:show running-config", "b")],
+        monkeypatch,
     )
     result = await handler.execute(
         _ctx(
