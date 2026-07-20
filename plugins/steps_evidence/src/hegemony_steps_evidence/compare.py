@@ -324,10 +324,17 @@ class CompareEvidenceHandler(BaseHandler):
                 evidence=evidence,
             )
         else:
-            failed_count = sum(
+            # For a single artifact_name comparison, diff_details is one
+            # comparison dict (not the {name: {...}} map), so exactly one
+            # artifact failed. Only the multi-artifact path counts per-name.
+            failed_count = (
                 1
-                for d in (diff_details.values() if isinstance(diff_details, dict) else [])
-                if isinstance(d, dict) and not d.get("passed", True)
+                if artifact_name
+                else sum(
+                    1
+                    for d in (diff_details.values() if isinstance(diff_details, dict) else [])
+                    if isinstance(d, dict) and not d.get("passed", True)
+                )
             )
             if changed_mode:
                 error = "Evidence comparison failed: no change detected"

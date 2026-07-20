@@ -99,3 +99,125 @@ def test_ignore_patterns_are_bounded() -> None:
     big = "Bytes: 1\n" + ("y" * compare_mod._MAX_MASK_INPUT_CHARS)
     compiled = handler._compile_ignore_patterns([r"Bytes: \d+"])
     assert handler._mask_ignored(big, compiled) == big
+
+
+# ── execute()-level coverage for artifact selection ──────────────────────────
+
+
+def _artifact(name: str, text: str) -> dict:
+    return {"name": name, "content_text": text}
+
+
+def _ctx(**config):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(config=config, step_id="cur", run_id="run-1", step_run_id="sr-1")
+
+
+def _handler_with(pre: list[dict], post: list[dict]) -> CompareEvidenceHandler:
+    """A handler whose artifact fetch returns canned pre/post lists by step id."""
+    handler = _handler()
+
+    async def fake_fetch(ctx, step_id):
+        return pre if step_id == "precheck" else post
+
+    handler._fetch_artifacts_for_step = fake_fetch  # type: ignore[method-assign]
+    return handler
+
+
+async def test_execute_pattern_selects_only_matching_artifacts() -> None:
+    """artifact_name_pattern compares only the running-config, not the route table."""
+    pre = [
+        _artifact("dc1:show running-config", "hostname dc1"),
+        _artifact("dc1:show ip route ospf", "O 10.0.0.0/24"),
+    ]
+    post = [
+        _artifact("dc1:show running-config", "hostname dc1\ninterface lo"),  # changed
+        _artifact("dc1:show ip route ospf", "O 10.0.0.0/24"),  # unchanged
+    ]
+    handler = _handler_with(pre, post)
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            comparison_type="changed",
+            artifact_name_pattern="*show running-config",
+        )
+    )
+    # Only the (changed) running-config was compared → changed-mode passes;
+    # the unchanged route table was excluded by the pattern.
+    assert result.success is True
+
+
+async def test_execute_pattern_no_precheck_match_errors() -> None:
+    handler = _handler_with(
+        [_artifact("dc1:show ip route ospf", "x")],
+        [_artifact("dc1:show ip route ospf", "x")],
+    )
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            artifact_name_pattern="*running-config",
+        )
+    )
+    assert result.success is False
+    assert "precheck" in (result.error or "") and "pattern" in (result.error or "")
+
+
+async def test_execute_pattern_no_postcheck_match_errors() -> None:
+    """Symmetric check: an empty postcheck match names the postcheck side."""
+    handler = _handler_with(
+        [_artifact("dc1:show running-config", "x")],
+        [_artifact("dc1:show ip route ospf", "y")],
+    )
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            artifact_name_pattern="*running-config",
+        )
+    )
+    assert result.success is False
+    assert "postcheck" in (result.error or "") and "pattern" in (result.error or "")
+
+
+async def test_execute_artifact_name_takes_precedence_over_pattern() -> None:
+    """When both are set, the exact artifact_name wins over the glob."""
+    pre = [
+        _artifact("dc1:show running-config", "a"),
+        _artifact("dc1:show ip route ospf", "same"),
+    ]
+    post = [
+        _artifact("dc1:show running-config", "b"),  # changed
+        _artifact("dc1:show ip route ospf", "same"),  # unchanged
+    ]
+    handler = _handler_with(pre, post)
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            comparison_type="changed",
+            artifact_name="dc1:show running-config",
+            artifact_name_pattern="*show ip route ospf",  # would pick the unchanged one
+        )
+    )
+    # The exact name (changed) was used, not the pattern (unchanged) → success.
+    assert result.success is True
+
+
+async def test_execute_single_artifact_failure_counts_one_of_one() -> None:
+    """Regression: a failed exact-artifact compare reports 1 of 1, not 0 of 1."""
+    handler = _handler_with(
+        [_artifact("dc1:show running-config", "a")],
+        [_artifact("dc1:show running-config", "b")],
+    )
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            artifact_name="dc1:show running-config",  # exact, default exact mode
+        )
+    )
+    assert result.success is False
+    assert "1 of 1" in (result.summary or "")
